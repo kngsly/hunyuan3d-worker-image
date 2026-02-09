@@ -10,6 +10,7 @@ Why shape-only:
 from __future__ import annotations
 
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -19,6 +20,10 @@ from PIL import Image
 
 def _lazy_import_pipeline():
     # These imports are heavy; do them only on first request.
+    # The Space layout isn't a standard pip package; add local dirs to sys.path.
+    sys.path.insert(0, "/app")
+    sys.path.insert(0, "/app/hy3dshape")
+    sys.path.insert(0, "/app/hy3dpaint")
     from hy3dshape import Hunyuan3DDiTFlowMatchingPipeline
     return Hunyuan3DDiTFlowMatchingPipeline
 
@@ -65,4 +70,3 @@ def generate_glb_from_image_bytes(image_bytes: bytes, out_dir: Path) -> Path:
     dt = time.time() - t0
     print(f"[worker] generated {out_path} in {dt:.1f}s (bytes_in={len(image_bytes)})", flush=True)
     return out_path
-

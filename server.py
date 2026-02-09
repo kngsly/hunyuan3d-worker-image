@@ -11,6 +11,7 @@ Endpoints:
 from __future__ import annotations
 
 import os
+import traceback
 from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile
@@ -39,7 +40,11 @@ async def generate(image: UploadFile = File(...)):
         # Keep the response shape that rent.py expects.
         return JSONResponse({"success": True, "glb_path": str(out_path)}, status_code=200)
     except Exception as e:
-        return JSONResponse({"success": False, "error": str(e)}, status_code=200)
+        tb = traceback.format_exc()
+        # Keep the payload small-ish but useful.
+        if len(tb) > 20000:
+            tb = tb[:20000] + "\n...[truncated]...\n"
+        return JSONResponse({"success": False, "error": tb or str(e)}, status_code=200)
 
 
 @app.get("/download/{filename}")
@@ -56,4 +61,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=APP_PORT, log_level="info")
-
