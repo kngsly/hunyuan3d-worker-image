@@ -45,7 +45,9 @@ def _get_pipeline():
     _PIPELINE = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         model_path,
         subfolder=subfolder,
-        use_safetensors=True,
+        # The official Space currently provides FP16 weights as a .ckpt, not .safetensors.
+        # If we set use_safetensors=True, smart_load_model will look for model.fp16.safetensors and fail.
+        use_safetensors=False,
         device=device,
     )
     return _PIPELINE
