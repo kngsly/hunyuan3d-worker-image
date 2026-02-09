@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
-from worker import generate_glb_from_image_bytes
+from worker import generate_glb_from_image_bytes, get_ready_state, start_preload_in_background
 
 
 APP_PORT = int(os.environ.get("PORT", "8000"))
@@ -30,6 +30,22 @@ app = FastAPI()
 @app.get("/health")
 def health():
     return JSONResponse({"status": "OK"}, status_code=200)
+
+
+@app.get("/ready")
+def ready():
+    """
+    Readiness that reflects whether the model weights have been downloaded and the pipeline is loaded.
+    """
+    st = get_ready_state()
+    ok = st.get("status") == "ready"
+    return JSONResponse({"ready": bool(ok), **st}, status_code=200)
+
+
+@app.on_event("startup")
+def _startup():
+    # Kick off model preload so /ready becomes true without waiting for the first /generate.
+    start_preload_in_background()
 
 
 @app.post("/generate")
