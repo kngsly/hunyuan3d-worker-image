@@ -36,9 +36,11 @@ RUN (ls -1 custom_rasterizer-*.whl >/dev/null 2>&1 && pip install custom_rasteri
 COPY requirements-docker.txt /app/requirements-docker.txt
 RUN pip install -r /app/requirements-docker.txt
 
-# Model download is optional; leave it deferred so builds don't randomly fail.
-RUN python -c "import os; os.makedirs('/app/.cache/huggingface', exist_ok=True)" \
-    && (python -c \"from huggingface_hub import snapshot_download; snapshot_download('tencent/Hunyuan3D-2.1', cache_dir='/app/.cache/huggingface')\" || echo 'Model download deferred to first run')
+# Do NOT download model weights at build time:
+# - it makes CI flaky (rate limits / transient network)
+# - it bloats the image and slows down pushes/pulls
+# We download lazily on the first /generate request (HF cache under HF_HOME).
+RUN python -c "import os; os.makedirs('/app/.cache/huggingface', exist_ok=True)"
 
 COPY worker.py /app/worker.py
 COPY server.py /app/server.py
@@ -47,4 +49,3 @@ RUN mkdir -p /outputs
 
 EXPOSE 8000
 CMD ["python", "server.py"]
-
