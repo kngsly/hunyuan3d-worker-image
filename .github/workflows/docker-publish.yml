@@ -2,11 +2,16 @@ name: docker-publish
 
 on:
   push:
-    branches: ["main"]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  # Prevent burning Actions minutes on overlapping builds. New runs cancel old ones.
+  group: docker-publish
+  cancel-in-progress: true
 
 jobs:
   build-and-push:
@@ -44,4 +49,3 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
