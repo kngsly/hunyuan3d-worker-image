@@ -14,6 +14,7 @@ import io
 import os
 import sys
 import time
+import traceback
 import uuid
 from pathlib import Path
 
@@ -108,9 +109,8 @@ def _is_truthy(value: str | None) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _decimate_mesh(mesh, target_faces: int):
+def _decimate_trimesh(mesh, target_faces: int):
     """Decimate a trimesh mesh to the target face count using quadric decimation."""
-    import trimesh
     face_count = len(mesh.faces) if hasattr(mesh, "faces") else 0
     if face_count <= 0 or face_count <= target_faces:
         print(f"[worker] decimation skipped (faces={face_count}, target={target_faces})", flush=True)
@@ -127,6 +127,14 @@ def _decimate_mesh(mesh, target_faces: int):
     return mesh
 
 
+def _decimate_glb(glb_path: Path, target_faces: int):
+    """Reload a GLB via trimesh, decimate, and overwrite the file."""
+    import trimesh
+    loaded = trimesh.load(str(glb_path), force="mesh")
+    decimated = _decimate_trimesh(loaded, target_faces)
+    decimated.export(str(glb_path))
+
+
 def generate_glb_from_image_bytes(
     image_bytes: bytes,
     out_dir: Path,
@@ -141,6 +149,7 @@ def generate_glb_from_image_bytes(
     Returns dict with:
       - glb_path: Path to the generated GLB
       - preprocessed_image_path: Path to the rembg-processed image (if applicable), or None
+      - texture_status: "success", "skipped", or error message
     """
     if not image_bytes:
         raise ValueError("empty image upload")
@@ -167,7 +176,50 @@ def generate_glb_from_image_bytes(
     dt_shape = time.time() - t_shape
     print(f"[worker] shape generation done in {dt_shape:.1f}s", flush=True)
 
-    # Texture generation (if requested and paint pipeline is available)
+    # -- Decimation BEFORE texturing --
+    # We decimate the shape mesh first, then paint textures onto the
+    # decimated mesh. This avoids the problem of trimesh stripping
+    # UV/material data when reloading a textured GLB.
+    did_decimate = False
+    if decimation_target is not None and decimation_target > 0:
+        try:
+            # Export shape-only mesh to a temp GLB, reload via trimesh,
+            # decimate, and save back.
+            tmp_shape = out_dir / f"_shape_{uuid.uuid4().hex}.glb"
+            mesh.export(str(tmp_shape))
+            _decimate_glb(tmp_shape, decimation_target)
+            did_decimate = True
+
+            # Reload the decimated mesh back into the format the paint
+            # pipeline expects.  Try the Hunyuan3D Mesh loader first;
+            # fall back to passing the trimesh object directly.
+            try:
+                sys.path.insert(0, "/app")
+                sys.path.insert(0, "/app/hy3dshape")
+                from hy3dgen.shapegen.utils import Mesh as HY3DMesh
+                mesh = HY3DMesh.load(str(tmp_shape))
+                print(f"[worker] reloaded decimated mesh via HY3DMesh.load", flush=True)
+            except Exception as e1:
+                print(f"[worker] HY3DMesh.load failed ({e1}), trying trimesh reload", flush=True)
+                try:
+                    import trimesh
+                    mesh = trimesh.load(str(tmp_shape))
+                    print(f"[worker] reloaded decimated mesh via trimesh", flush=True)
+                except Exception as e2:
+                    print(f"[worker] trimesh reload also failed ({e2}), using original mesh", flush=True)
+                    did_decimate = False
+
+            # Clean up temp file
+            try:
+                tmp_shape.unlink()
+            except OSError:
+                pass
+        except Exception as e:
+            print(f"[worker] pre-texture decimation failed, using original: {e}", flush=True)
+            traceback.print_exc()
+
+    # Texture generation (if requested)
+    texture_status = "skipped"
     if want_textures:
         try:
             paint_pipeline = _get_paint_pipeline()
@@ -176,46 +228,38 @@ def generate_glb_from_image_bytes(
             mesh = paint_pipeline(mesh, image=img)
             dt_tex = time.time() - t_tex
             print(f"[worker] texture generation done in {dt_tex:.1f}s", flush=True)
+            texture_status = "success"
         except Exception as e:
-            print(f"[worker] texture generation failed, exporting shape-only: {e}", flush=True)
+            tb = traceback.format_exc()
+            print(f"[worker] texture generation FAILED: {e}\n{tb}", flush=True)
+            texture_status = f"failed: {e}"
 
+    # Export final mesh
     fname = f"{uuid.uuid4().hex}.glb"
     out_path = out_dir / fname
     mesh.export(str(out_path))
+    file_size = out_path.stat().st_size
+    print(f"[worker] exported {out_path} ({file_size} bytes)", flush=True)
 
-    # Mesh decimation (if requested) — reload via trimesh to guarantee
-    # we have a Trimesh object with simplify_quadric_decimation support,
-    # since the Hunyuan3D pipeline returns its own mesh type.
-    # IMPORTANT: Skip trimesh-based decimation when textures are enabled,
-    # because trimesh's quadric decimation strips UV coordinates and
-    # force="mesh" drops materials entirely. The textured GLB from the
-    # paint pipeline is exported as-is.
-    if decimation_target is not None and decimation_target > 0:
-        if want_textures:
-            print(
-                f"[worker] decimation skipped: textures are enabled, "
-                f"trimesh decimation would strip UV/material data. "
-                f"Exporting textured mesh as-is.",
-                flush=True,
-            )
-        else:
-            try:
-                import trimesh
-                loaded = trimesh.load(str(out_path), force="mesh")
-                decimated = _decimate_mesh(loaded, decimation_target)
-                decimated.export(str(out_path))
-            except Exception as e:
-                print(f"[worker] trimesh decimation failed, keeping original: {e}", flush=True)
+    # If we didn't decimate before texturing (no target or failed),
+    # and textures are OFF, we can still decimate the exported GLB.
+    if not did_decimate and decimation_target is not None and decimation_target > 0 and not want_textures:
+        try:
+            _decimate_glb(out_path, decimation_target)
+        except Exception as e:
+            print(f"[worker] post-export decimation failed, keeping original: {e}", flush=True)
 
     dt_total = time.time() - t0
     print(
         f"[worker] generated {out_path} in {dt_total:.1f}s "
-        f"(bytes_in={len(image_bytes)}, textures={'yes' if want_textures else 'no'}, "
+        f"(bytes_in={len(image_bytes)}, textures={texture_status}, "
         f"preprocess={'yes' if preprocess_image else 'no'}, "
-        f"decimation_target={decimation_target or 'none'})",
+        f"decimation_target={decimation_target or 'none'}, "
+        f"decimated_before_paint={did_decimate})",
         flush=True,
     )
     return {
         "glb_path": out_path,
         "preprocessed_image_path": preprocessed_image_path,
+        "texture_status": texture_status,
     }

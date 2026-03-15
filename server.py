@@ -118,9 +118,12 @@ async def generate(request: Request):
         glb_path = result["glb_path"]
         preprocessed_path = result.get("preprocessed_image_path")
 
+        texture_status = result.get("texture_status", "unknown")
+
         response = {
             "success": True,
             "glb_path": str(glb_path),
+            "texture_status": texture_status,
         }
 
         # Include preprocessed image filenames inside worker_export so the
