@@ -47,9 +47,10 @@ RUN if [ -f hy3dpaint/DifferentiableRenderer/compile_mesh_painter.sh ]; then \
 COPY requirements-docker.txt /app/requirements-docker.txt
 RUN pip install -r /app/requirements-docker.txt
 
-# Model download is optional; leave it deferred so builds don't randomly fail.
-RUN python -c "import os; os.makedirs('/app/.cache/huggingface', exist_ok=True)" \
-    && (python -c 'from huggingface_hub import snapshot_download; snapshot_download("tencent/Hunyuan3D-2.1", cache_dir="/app/.cache/huggingface")' || echo 'Model download deferred to first run')
+# Model weights are NOT baked into the image — they are downloaded at
+# container startup via huggingface_hub.snapshot_download() and cached in
+# HF_HOME.  This keeps the Docker image small and fast to pull.
+RUN mkdir -p /app/.cache/huggingface
 
 COPY worker.py /app/worker.py
 COPY server.py /app/server.py

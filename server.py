@@ -4,7 +4,7 @@ FastAPI server for Hunyuan3D-2.1 worker.
 
 Endpoints:
   - GET  /health  -> {"status":"OK"}
-  - GET  /ready   -> {"ready": true, "status": "OK"}
+  - GET  /ready   -> {"ready": bool, "status": ..., "detail": ...}
   - POST /generate (multipart) -> JSON with glb_path, preprocessed_images, etc.
   - GET  /download/{filename}  -> file bytes
 """
@@ -14,13 +14,19 @@ from __future__ import annotations
 import os
 import time
 import traceback
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, File, Form, UploadFile, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from worker import generate_glb_from_image_bytes, _is_truthy
+from worker import (
+    generate_glb_from_image_bytes,
+    get_ready_state,
+    start_preload_in_background,
+    _is_truthy,
+)
 
 
 APP_PORT = int(os.environ.get("PORT", "8000"))
@@ -31,7 +37,21 @@ _STARTED_AT = time.time()
 _LAST_REQUEST_AT = _STARTED_AT
 _REQUEST_COUNT = 0
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start server first so container is reachable; model download + load
+    # runs in a background thread.
+    start_preload_in_background()
+    print(
+        f"[server] listening on 0.0.0.0:{APP_PORT}; "
+        f"preload (model download + pipeline load) running in background",
+        flush=True,
+    )
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health")
@@ -41,7 +61,13 @@ def health():
 
 @app.get("/ready")
 def ready():
-    return JSONResponse({"ready": True, "status": "OK"}, status_code=200)
+    st = get_ready_state()
+    is_ready = st["status"] == "ready"
+    return JSONResponse({
+        "ready": is_ready,
+        "status": st["status"],
+        "detail": st.get("detail", ""),
+    }, status_code=200)
 
 
 @app.get("/idle")
@@ -97,12 +123,22 @@ async def generate(request: Request):
             except (ValueError, TypeError):
                 pass
 
+        # Parse optional texture output size (1024, 2048, 4096)
+        texture_output_size = None
+        tex_size_raw = form.get("texture_output_size")
+        if tex_size_raw is not None:
+            try:
+                texture_output_size = int(str(tex_size_raw).strip())
+            except (ValueError, TypeError):
+                pass
+
         # Log request info (matches API contract)
         expected_images = form.get("expected_images", "1")
         print(
             f"[worker] generate expected_images={expected_images} "
             f"textures={want_textures} preprocess={preprocess_image} "
-            f"seed={seed} decimation_target={decimation_target} bytes={len(raw)}",
+            f"seed={seed} decimation_target={decimation_target} "
+            f"texture_output_size={texture_output_size} bytes={len(raw)}",
             flush=True,
         )
 
@@ -113,11 +149,11 @@ async def generate(request: Request):
             preprocess_image=preprocess_image,
             seed=seed,
             decimation_target=decimation_target,
+            texture_output_size=texture_output_size,
         )
 
         glb_path = result["glb_path"]
         preprocessed_path = result.get("preprocessed_image_path")
-
         texture_status = result.get("texture_status", "unknown")
 
         response = {
