@@ -22,10 +22,12 @@ def convert_obj_to_glb(
     """Convert OBJ file to GLB format using trimesh (bpy-free)."""
     try:
         import trimesh
-        mesh = trimesh.load(obj_path, force="mesh", process=False)
-        mesh.export(glb_path)
+        # Load as scene to preserve materials and texture maps from the .mtl
+        scene = trimesh.load(obj_path, process=False)
+        scene.export(glb_path, file_type="glb")
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[patch] convert_obj_to_glb failed: {e}", flush=True)
         return False
 '''
 
