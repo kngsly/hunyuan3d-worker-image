@@ -1,17 +1,17 @@
 """
-Patch hy3dpaint/DifferentiableRenderer/mesh_utils.py to remove the bpy
-(Blender) dependency and replace convert_obj_to_glb with a trimesh-based
-implementation.
-
-bpy is huge and unnecessary — the only thing the worker needs is a simple
-OBJ → GLB conversion, which trimesh handles fine.
+Replace hy3dpaint/DifferentiableRenderer/mesh_utils.py entirely to remove the
+bpy (Blender) dependency.  The only function the paint pipeline imports from
+this module is convert_obj_to_glb, so we replace the whole file with a minimal
+trimesh-based implementation.
 """
 
-import pathlib, re
+import pathlib, sys
 
 TARGET = pathlib.Path("hy3dpaint/DifferentiableRenderer/mesh_utils.py")
 
 REPLACEMENT = '''\
+"""mesh_utils.py — patched to remove bpy dependency, using trimesh instead."""
+
 def convert_obj_to_glb(
     obj_path: str,
     glb_path: str,
@@ -22,30 +22,41 @@ def convert_obj_to_glb(
     """Convert OBJ file to GLB format using trimesh (bpy-free)."""
     try:
         import trimesh
-        # Load as scene to preserve materials and texture maps from the .mtl
         scene = trimesh.load(obj_path, process=False)
         scene.export(glb_path, file_type="glb")
         return True
     except Exception as e:
-        print(f"[patch] convert_obj_to_glb failed: {e}", flush=True)
+        print(f"[mesh_utils] convert_obj_to_glb failed: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
         return False
 '''
 
-code = TARGET.read_text()
+if not TARGET.exists():
+    print(f"ERROR: {TARGET} not found — repo layout may have changed", file=sys.stderr)
+    sys.exit(1)
 
-# Comment out `import bpy`
-code = re.sub(r'^import bpy\b', '# import bpy  # patched: using trimesh', code, flags=re.MULTILINE)
+# Read original to log what we're replacing
+original = TARGET.read_text()
+has_bpy = "import bpy" in original
+has_func = "def convert_obj_to_glb" in original
+print(f"patching {TARGET}: has_bpy={has_bpy}, has_convert_obj_to_glb={has_func}")
+print(f"original file: {len(original)} bytes, {original.count(chr(10))} lines")
 
-# Replace the convert_obj_to_glb function (and any bpy helpers it calls)
-# by finding it and replacing up to the next top-level def/class/EOF
-pattern = r'def convert_obj_to_glb\(.*?\n(?=(?:def |class )|\Z)'
-if re.search(pattern, code, flags=re.DOTALL):
-    code = re.sub(pattern, REPLACEMENT + '\n', code, flags=re.DOTALL)
-    print("patched: replaced convert_obj_to_glb with trimesh version")
-else:
-    # Fallback: just append the function at the end
-    code += '\n' + REPLACEMENT
-    print("patched: appended trimesh convert_obj_to_glb (original not found)")
+# Overwrite entirely
+TARGET.write_text(REPLACEMENT)
+print(f"patched: {TARGET} replaced ({len(REPLACEMENT)} bytes)")
 
-TARGET.write_text(code)
-print(f"patched: {TARGET}")
+# Verify the patch works at import time
+sys.path.insert(0, str(TARGET.parent.parent))
+sys.path.insert(0, str(TARGET.parent))
+try:
+    import importlib
+    spec = importlib.util.spec_from_file_location("mesh_utils", str(TARGET))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert hasattr(mod, "convert_obj_to_glb"), "convert_obj_to_glb not found after patch"
+    print("verified: patched mesh_utils.py imports successfully")
+except Exception as e:
+    print(f"ERROR: patched mesh_utils.py fails to import: {e}", file=sys.stderr)
+    sys.exit(1)
