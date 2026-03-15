@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Shape-only Hunyuan3D-2.1 worker.
+Hunyuan3D-2.1 worker with texture and background removal support.
 
-Why shape-only:
-  - texture pipeline in the upstream Space often pulls in Blender `bpy`, which is unreliable to install.
-  - for your goal (image -> glb), shape-only is the most reliable baseline.
+Supports:
+  - Shape-only generation (default, or when texture flags are absent)
+  - Textured generation via the Hunyuan3D paint pipeline
+  - Background removal via rembg (BiRefNet) when preprocess_image is requested
 """
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 import time
@@ -18,9 +20,8 @@ from pathlib import Path
 from PIL import Image
 
 
-def _lazy_import_pipeline():
-    # These imports are heavy; do them only on first request.
-    # The Space layout isn't a standard pip package; add local dirs to sys.path.
+def _lazy_import_shape_pipeline():
+    """Import shape pipeline on first use (heavy imports)."""
     sys.path.insert(0, "/app")
     sys.path.insert(0, "/app/hy3dshape")
     sys.path.insert(0, "/app/hy3dpaint")
@@ -28,45 +29,148 @@ def _lazy_import_pipeline():
     return Hunyuan3DDiTFlowMatchingPipeline
 
 
-_PIPELINE = None
+def _lazy_import_paint_pipeline():
+    """Import paint/texture pipeline on first use."""
+    sys.path.insert(0, "/app")
+    sys.path.insert(0, "/app/hy3dshape")
+    sys.path.insert(0, "/app/hy3dpaint")
+    from hy3dpaint import Hunyuan3DPaintPipeline
+    return Hunyuan3DPaintPipeline
 
 
-def _get_pipeline():
-    global _PIPELINE
-    if _PIPELINE is not None:
-        return _PIPELINE
+_SHAPE_PIPELINE = None
+_PAINT_PIPELINE = None
+_REMBG_SESSION = None
+
+
+def _get_shape_pipeline():
+    global _SHAPE_PIPELINE
+    if _SHAPE_PIPELINE is not None:
+        return _SHAPE_PIPELINE
 
     model_path = os.environ.get("HY3D_MODEL_PATH", "tencent/Hunyuan3D-2.1")
-    # The Space repo expects this subfolder for 2.1.
     subfolder = os.environ.get("HY3D_SUBFOLDER", "hunyuan3d-dit-v2-1")
     device = os.environ.get("HY3D_DEVICE", "cuda")
 
-    Hunyuan3DDiTFlowMatchingPipeline = _lazy_import_pipeline()
-    _PIPELINE = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+    Hunyuan3DDiTFlowMatchingPipeline = _lazy_import_shape_pipeline()
+    _SHAPE_PIPELINE = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         model_path,
         subfolder=subfolder,
         use_safetensors=True,
         device=device,
     )
-    return _PIPELINE
+    return _SHAPE_PIPELINE
 
 
-def generate_glb_from_image_bytes(image_bytes: bytes, out_dir: Path) -> Path:
+def _get_paint_pipeline():
+    global _PAINT_PIPELINE
+    if _PAINT_PIPELINE is not None:
+        return _PAINT_PIPELINE
+
+    model_path = os.environ.get("HY3D_MODEL_PATH", "tencent/Hunyuan3D-2.1")
+    device = os.environ.get("HY3D_DEVICE", "cuda")
+
+    Hunyuan3DPaintPipeline = _lazy_import_paint_pipeline()
+    _PAINT_PIPELINE = Hunyuan3DPaintPipeline.from_pretrained(
+        model_path,
+        subfolder="hunyuan3d-paint-v2-1",
+        use_safetensors=True,
+        device=device,
+    )
+    return _PAINT_PIPELINE
+
+
+def _get_rembg_session():
+    global _REMBG_SESSION
+    if _REMBG_SESSION is not None:
+        return _REMBG_SESSION
+    from rembg import new_session
+    _REMBG_SESSION = new_session("birefnet-general")
+    return _REMBG_SESSION
+
+
+def remove_background(img: Image.Image) -> Image.Image:
+    """Remove background using rembg (BiRefNet model)."""
+    from rembg import remove
+    session = _get_rembg_session()
+    print("[worker] rembg: running background removal", flush=True)
+    t0 = time.time()
+    result = remove(img, session=session)
+    dt = time.time() - t0
+    print(f"[worker] rembg: done in {dt:.1f}s", flush=True)
+    return result.convert("RGBA")
+
+
+def _is_truthy(value: str | None) -> bool:
+    """Check if a form field value is truthy."""
+    if not value:
+        return False
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def generate_glb_from_image_bytes(
+    image_bytes: bytes,
+    out_dir: Path,
+    want_textures: bool = False,
+    preprocess_image: bool = False,
+    seed: int | None = None,
+) -> dict:
+    """
+    Generate a GLB from input image bytes.
+
+    Returns dict with:
+      - glb_path: Path to the generated GLB
+      - preprocessed_image_path: Path to the rembg-processed image (if applicable), or None
+    """
     if not image_bytes:
         raise ValueError("empty image upload")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
-    img = Image.open(__import__("io").BytesIO(image_bytes)).convert("RGBA")
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
 
-    pipeline = _get_pipeline()
-    mesh = pipeline(image=img)[0]
+    # Background removal
+    preprocessed_image_path = None
+    if preprocess_image:
+        img = remove_background(img)
+        # Save the preprocessed image so the main app can download it
+        rembg_name = f"rembg_{uuid.uuid4().hex}.png"
+        preprocessed_image_path = out_dir / rembg_name
+        img.save(str(preprocessed_image_path), format="PNG")
+        print(f"[worker] rembg: saved preprocessed image to {preprocessed_image_path}", flush=True)
+
+    # Shape generation
+    shape_pipeline = _get_shape_pipeline()
+    print("[worker] generating shape...", flush=True)
+    t_shape = time.time()
+    mesh = shape_pipeline(image=img, seed=seed)[0] if seed is not None else shape_pipeline(image=img)[0]
+    dt_shape = time.time() - t_shape
+    print(f"[worker] shape generation done in {dt_shape:.1f}s", flush=True)
+
+    # Texture generation (if requested and paint pipeline is available)
+    if want_textures:
+        try:
+            paint_pipeline = _get_paint_pipeline()
+            print("[worker] generating textures...", flush=True)
+            t_tex = time.time()
+            mesh = paint_pipeline(mesh, image=img)
+            dt_tex = time.time() - t_tex
+            print(f"[worker] texture generation done in {dt_tex:.1f}s", flush=True)
+        except Exception as e:
+            print(f"[worker] texture generation failed, exporting shape-only: {e}", flush=True)
 
     fname = f"{uuid.uuid4().hex}.glb"
     out_path = out_dir / fname
     mesh.export(str(out_path))
 
-    # Keep some timing info in logs (uvicorn stdout).
-    dt = time.time() - t0
-    print(f"[worker] generated {out_path} in {dt:.1f}s (bytes_in={len(image_bytes)})", flush=True)
-    return out_path
+    dt_total = time.time() - t0
+    print(
+        f"[worker] generated {out_path} in {dt_total:.1f}s "
+        f"(bytes_in={len(image_bytes)}, textures={'yes' if want_textures else 'no'}, "
+        f"preprocess={'yes' if preprocess_image else 'no'})",
+        flush=True,
+    )
+    return {
+        "glb_path": out_path,
+        "preprocessed_image_path": preprocessed_image_path,
+    }
