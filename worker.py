@@ -32,7 +32,7 @@ def _lazy_import_shape_pipeline():
     sys.path.insert(0, "/app")
     sys.path.insert(0, "/app/hy3dshape")
     sys.path.insert(0, "/app/hy3dpaint")
-    from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
+    from hy3dshape import Hunyuan3DDiTFlowMatchingPipeline
     return Hunyuan3DDiTFlowMatchingPipeline
 
 
@@ -41,7 +41,7 @@ def _lazy_import_paint_pipeline():
     sys.path.insert(0, "/app")
     sys.path.insert(0, "/app/hy3dshape")
     sys.path.insert(0, "/app/hy3dpaint")
-    from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
+    from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
     return Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
 
 
@@ -139,9 +139,9 @@ def _get_paint_pipeline(texture_output_size: int | None = None):
     max_num_view = int(os.environ.get("HY3D_PAINT_VIEWS", "8"))
     resolution = int(os.environ.get("HY3D_PAINT_RESOLUTION", "768"))
     conf = Hunyuan3DPaintConfig(max_num_view, resolution)
-    conf.realesrgan_ckpt_path = "/app/hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
-    conf.multiview_cfg_path = "/app/hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
-    conf.custom_pipeline = "/app/hy3dpaint/hunyuanpaintpbr"
+    conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
+    conf.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
+    conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
 
     # Apply texture_output_size from the request (1024, 2048, or 4096).
     # This maps to conf.texture_size (UV bake resolution).
