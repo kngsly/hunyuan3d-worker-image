@@ -56,7 +56,7 @@ def _get_shape_pipeline():
     _SHAPE_PIPELINE = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         model_path,
         subfolder=subfolder,
-        use_safetensors=True,
+        use_safetensors=False,
         device=device,
     )
     return _SHAPE_PIPELINE

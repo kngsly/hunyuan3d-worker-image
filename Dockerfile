@@ -7,7 +7,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     # Avoid host-specific TBB issues in numba parallel code paths.
     NUMBA_THREADING_LAYER=workqueue \
-    HF_HOME=/app/.cache/huggingface
+    HF_HOME=/app/.cache/huggingface \
+    HY3DGEN_MODELS=/app/.cache/hy3dgen
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3.10 python3.10-venv python3.10-dev python3-pip \
