@@ -34,6 +34,16 @@ RUN git clone --depth 1 https://huggingface.co/spaces/tencent/Hunyuan3D-2.1 repo
 # If present in the Space, install optional wheel (ignore failures).
 RUN (ls -1 custom_rasterizer-*.whl >/dev/null 2>&1 && pip install custom_rasterizer-*.whl) || true
 
+# Build custom_rasterizer from source if the wheel wasn't available.
+RUN if ! python -c "import custom_rasterizer" 2>/dev/null; then \
+      (cd hy3dpaint/packages/custom_rasterizer && pip install -e .) || echo "custom_rasterizer build skipped"; \
+    fi
+
+# Build DifferentiableRenderer CUDA extension (required by paint pipeline).
+RUN if [ -f hy3dpaint/DifferentiableRenderer/compile_mesh_painter.sh ]; then \
+      (cd hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh) || echo "DifferentiableRenderer build skipped"; \
+    fi
+
 COPY requirements-docker.txt /app/requirements-docker.txt
 RUN pip install -r /app/requirements-docker.txt
 

@@ -118,7 +118,7 @@ def _decimate_mesh(mesh, target_faces: int):
     print(f"[worker] decimating mesh: {face_count} -> {target_faces} faces", flush=True)
     t0 = time.time()
     try:
-        mesh = mesh.simplify_quadric_decimation(target_faces)
+        mesh = mesh.simplify_quadric_decimation(face_count=target_faces)
         dt = time.time() - t0
         final = len(mesh.faces) if hasattr(mesh, "faces") else 0
         print(f"[worker] decimation done in {dt:.1f}s (result={final} faces)", flush=True)

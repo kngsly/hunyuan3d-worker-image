@@ -1,4 +1,4 @@
-# Minimal-ish runtime deps for shape-only Hunyuan3D-2.1 worker.
+# Runtime deps for Hunyuan3D-2.1 worker (shape + paint/texture).
 # Pinned to reduce "latest broke" surprises.
 
 fastapi==0.115.12
@@ -33,4 +33,18 @@ timm==0.9.16
 
 # hy3dshape postprocessors import pymeshlab unconditionally
 pymeshlab==2022.2.post3
+
+# --- Paint/texture pipeline deps ---
+xatlas==0.0.9
+open3d==0.18.0
+imageio==2.36.0
+scikit-image==0.24.0
+cupy-cuda12x==13.4.1
+torchdiffeq
+torchmetrics==1.6.0
+basicsr==1.4.2
+realesrgan==0.3.0
+
+# --- Mesh decimation ---
+fast-simplification
 
