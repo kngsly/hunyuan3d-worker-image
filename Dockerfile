@@ -52,6 +52,11 @@ RUN pip install -r /app/requirements-docker.txt
 # HF_HOME.  This keeps the Docker image small and fast to pull.
 RUN mkdir -p /app/.cache/huggingface
 
+# Patch mesh_utils.py: replace bpy-based OBJ→GLB conversion with trimesh
+# (bpy/Blender is not installed and is too heavy for this container).
+COPY patch_mesh_utils.py /tmp/patch_mesh_utils.py
+RUN python /tmp/patch_mesh_utils.py && rm /tmp/patch_mesh_utils.py
+
 COPY worker.py /app/worker.py
 COPY server.py /app/server.py
 
