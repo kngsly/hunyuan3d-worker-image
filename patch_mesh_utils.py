@@ -5,6 +5,7 @@ this module is convert_obj_to_glb, so we replace the whole file with a minimal
 trimesh-based implementation.
 """
 
+import importlib.util
 import pathlib, sys
 
 TARGET = pathlib.Path("hy3dpaint/DifferentiableRenderer/mesh_utils.py")
