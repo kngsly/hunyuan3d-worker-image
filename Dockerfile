@@ -38,7 +38,7 @@ RUN pip install -r /app/requirements-docker.txt
 
 # Model download is optional; leave it deferred so builds don't randomly fail.
 RUN python -c "import os; os.makedirs('/app/.cache/huggingface', exist_ok=True)" \
-    && (python -c \"from huggingface_hub import snapshot_download; snapshot_download('tencent/Hunyuan3D-2.1', cache_dir='/app/.cache/huggingface')\" || echo 'Model download deferred to first run')
+    && (python -c 'from huggingface_hub import snapshot_download; snapshot_download("tencent/Hunyuan3D-2.1", cache_dir="/app/.cache/huggingface")' || echo 'Model download deferred to first run')
 
 COPY worker.py /app/worker.py
 COPY server.py /app/server.py
