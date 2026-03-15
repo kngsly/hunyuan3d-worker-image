@@ -69,13 +69,14 @@ async def generate(request: Request):
             return JSONResponse({"success": False, "error": "No image uploaded"}, status_code=400)
         raw = await image_file.read()
 
-        # Parse flags
-        want_textures = (
-            _is_truthy(form.get("texture"))
-            or _is_truthy(form.get("textures"))
-            or _is_truthy(form.get("enable_texture"))
-            or _is_truthy(form.get("embed_textures"))
+        # Parse flags — textures default to ON; caller can disable with
+        # no_texture=1 or by explicitly passing texture=0 / false / off.
+        _explicit_off = any(
+            str(form.get(k, "")).strip().lower() in ("0", "false", "no", "off")
+            for k in ("texture", "textures", "enable_texture", "embed_textures")
         )
+        _explicit_no = _is_truthy(form.get("no_texture")) or _is_truthy(form.get("no_textures"))
+        want_textures = not (_explicit_off or _explicit_no)
         preprocess_image = _is_truthy(form.get("preprocess_image"))
 
         # Parse optional seed
