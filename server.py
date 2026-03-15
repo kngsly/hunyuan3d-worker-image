@@ -155,6 +155,13 @@ async def generate(request: Request):
         glb_path = result["glb_path"]
         preprocessed_path = result.get("preprocessed_image_path")
         texture_status = result.get("texture_status", "unknown")
+        glb_size = glb_path.stat().st_size if Path(str(glb_path)).is_file() else 0
+
+        print(
+            f"[server] generate done: texture_status={texture_status} "
+            f"glb_size={glb_size} glb_path={glb_path}",
+            flush=True,
+        )
 
         response = {
             "success": True,

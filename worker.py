@@ -51,6 +51,7 @@ def _lazy_import_paint_pipeline():
 
 _SHAPE_PIPELINE = None
 _PAINT_PIPELINE = None
+_PAINT_LAST_ERROR = None  # last paint pipeline error for diagnostics
 _REMBG_SESSION = None
 
 _READY_LOCK = threading.Lock()
@@ -192,10 +193,13 @@ def _preload_worker():
                 _get_paint_pipeline()
                 print("[worker] preload: paint pipeline loaded", flush=True)
             except Exception:
+                global _PAINT_LAST_ERROR
                 tb = traceback.format_exc()
+                _PAINT_LAST_ERROR = tb[-2000:] if tb else "unknown"
                 print(f"[worker] preload: paint pipeline failed (will retry on first use):\n{tb}", flush=True)
 
-        _set_ready("ready", "shape pipeline loaded")
+        paint_ok = _PAINT_PIPELINE is not None
+        _set_ready("ready", f"shape=ok paint={'ok' if paint_ok else 'FAILED: ' + (_PAINT_LAST_ERROR or 'unknown')[:200]}")
         st = get_ready_state()
         dt = (st.get("ready_at") or time.time()) - (st.get("started_at") or time.time())
         print(f"[worker] preload: ready (load_time_sec={dt:.1f})", flush=True)
@@ -340,8 +344,9 @@ def generate_glb_from_image_bytes(
 
     if want_textures:
         try:
+            print(f"[worker] texture: requesting paint pipeline (texture_output_size={texture_output_size})", flush=True)
             paint_pipeline = _get_paint_pipeline(texture_output_size=texture_output_size)
-            print("[worker] generating textures...", flush=True)
+            print(f"[worker] texture: paint pipeline ready, type={type(paint_pipeline).__name__}", flush=True)
             t_tex = time.time()
 
             # The paint pipeline writes an OBJ first, then converts to GLB
@@ -350,6 +355,7 @@ def generate_glb_from_image_bytes(
             textured_obj = out_dir / f"_textured_{uuid.uuid4().hex}.obj"
             textured_glb = Path(str(textured_obj).replace(".obj", ".glb"))
 
+            print(f"[worker] texture: calling paint pipeline mesh_path={shape_glb} image_path={input_image_path} output={textured_obj}", flush=True)
             result_path = paint_pipeline(
                 mesh_path=str(shape_glb),
                 image_path=str(input_image_path),
@@ -357,14 +363,20 @@ def generate_glb_from_image_bytes(
                 save_glb=True,
             )
             dt_tex = time.time() - t_tex
-            print(f"[worker] texture generation done in {dt_tex:.1f}s", flush=True)
-            print(f"[worker] paint pipeline returned: {result_path}", flush=True)
+            print(f"[worker] texture: paint pipeline returned in {dt_tex:.1f}s: {result_path}", flush=True)
+
+            # List output files for debugging
+            import glob as globmod
+            out_files = globmod.glob(str(out_dir / "_textured_*"))
+            print(f"[worker] texture: output files matching _textured_*: {out_files}", flush=True)
+            print(f"[worker] texture: textured_obj exists={textured_obj.is_file()} textured_glb exists={textured_glb.is_file()}", flush=True)
 
             # The pipeline returns the OBJ path; the GLB is at the .glb sibling.
             if textured_glb.is_file():
+                glb_size = textured_glb.stat().st_size
                 textured_glb.rename(final_glb)
                 texture_status = "success"
-                print(f"[worker] textured GLB: {final_glb} ({final_glb.stat().st_size} bytes)", flush=True)
+                print(f"[worker] textured GLB: {final_glb} ({glb_size} bytes)", flush=True)
             elif Path(str(result_path)).is_file():
                 # Fallback: if only the OBJ exists, use it (caller gets OBJ not GLB)
                 Path(str(result_path)).rename(final_glb)
@@ -385,7 +397,7 @@ def generate_glb_from_image_bytes(
                     pass
         except Exception as e:
             tb = traceback.format_exc()
-            print(f"[worker] texture generation FAILED: {e}\n{tb}", flush=True)
+            print(f"[worker] texture FAILED: {e}\n{tb}", flush=True)
             texture_status = f"failed: {e}"
             # Fall back to shape-only
             if shape_glb.is_file():
