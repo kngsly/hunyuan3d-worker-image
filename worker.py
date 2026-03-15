@@ -108,12 +108,32 @@ def _is_truthy(value: str | None) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _decimate_mesh(mesh, target_faces: int):
+    """Decimate a trimesh mesh to the target face count using quadric decimation."""
+    import trimesh
+    face_count = len(mesh.faces) if hasattr(mesh, "faces") else 0
+    if face_count <= 0 or face_count <= target_faces:
+        print(f"[worker] decimation skipped (faces={face_count}, target={target_faces})", flush=True)
+        return mesh
+    print(f"[worker] decimating mesh: {face_count} -> {target_faces} faces", flush=True)
+    t0 = time.time()
+    try:
+        mesh = mesh.simplify_quadric_decimation(target_faces)
+        dt = time.time() - t0
+        final = len(mesh.faces) if hasattr(mesh, "faces") else 0
+        print(f"[worker] decimation done in {dt:.1f}s (result={final} faces)", flush=True)
+    except Exception as e:
+        print(f"[worker] decimation failed, using original mesh: {e}", flush=True)
+    return mesh
+
+
 def generate_glb_from_image_bytes(
     image_bytes: bytes,
     out_dir: Path,
     want_textures: bool = False,
     preprocess_image: bool = False,
     seed: int | None = None,
+    decimation_target: int | None = None,
 ) -> dict:
     """
     Generate a GLB from input image bytes.
@@ -159,6 +179,10 @@ def generate_glb_from_image_bytes(
         except Exception as e:
             print(f"[worker] texture generation failed, exporting shape-only: {e}", flush=True)
 
+    # Mesh decimation (if requested)
+    if decimation_target is not None and decimation_target > 0:
+        mesh = _decimate_mesh(mesh, decimation_target)
+
     fname = f"{uuid.uuid4().hex}.glb"
     out_path = out_dir / fname
     mesh.export(str(out_path))
@@ -167,7 +191,8 @@ def generate_glb_from_image_bytes(
     print(
         f"[worker] generated {out_path} in {dt_total:.1f}s "
         f"(bytes_in={len(image_bytes)}, textures={'yes' if want_textures else 'no'}, "
-        f"preprocess={'yes' if preprocess_image else 'no'})",
+        f"preprocess={'yes' if preprocess_image else 'no'}, "
+        f"decimation_target={decimation_target or 'none'})",
         flush=True,
     )
     return {

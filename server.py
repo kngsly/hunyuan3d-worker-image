@@ -87,12 +87,21 @@ async def generate(request: Request):
             except (ValueError, TypeError):
                 pass
 
+        # Parse optional decimation target
+        decimation_target = None
+        dec_raw = form.get("decimation_target")
+        if dec_raw is not None:
+            try:
+                decimation_target = int(str(dec_raw).strip())
+            except (ValueError, TypeError):
+                pass
+
         # Log request info (matches API contract)
         expected_images = form.get("expected_images", "1")
         print(
             f"[worker] generate expected_images={expected_images} "
             f"textures={want_textures} preprocess={preprocess_image} "
-            f"seed={seed} bytes={len(raw)}",
+            f"seed={seed} decimation_target={decimation_target} bytes={len(raw)}",
             flush=True,
         )
 
@@ -102,6 +111,7 @@ async def generate(request: Request):
             want_textures=want_textures,
             preprocess_image=preprocess_image,
             seed=seed,
+            decimation_target=decimation_target,
         )
 
         glb_path = result["glb_path"]
