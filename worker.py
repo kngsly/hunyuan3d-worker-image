@@ -179,13 +179,21 @@ def generate_glb_from_image_bytes(
         except Exception as e:
             print(f"[worker] texture generation failed, exporting shape-only: {e}", flush=True)
 
-    # Mesh decimation (if requested)
-    if decimation_target is not None and decimation_target > 0:
-        mesh = _decimate_mesh(mesh, decimation_target)
-
     fname = f"{uuid.uuid4().hex}.glb"
     out_path = out_dir / fname
     mesh.export(str(out_path))
+
+    # Mesh decimation (if requested) — reload via trimesh to guarantee
+    # we have a Trimesh object with simplify_quadric_decimation support,
+    # since the Hunyuan3D pipeline returns its own mesh type.
+    if decimation_target is not None and decimation_target > 0:
+        try:
+            import trimesh
+            loaded = trimesh.load(str(out_path), force="mesh")
+            decimated = _decimate_mesh(loaded, decimation_target)
+            decimated.export(str(out_path))
+        except Exception as e:
+            print(f"[worker] trimesh decimation failed, keeping original: {e}", flush=True)
 
     dt_total = time.time() - t0
     print(

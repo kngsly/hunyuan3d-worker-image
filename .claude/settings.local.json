@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(find:*)",
+      "Bash(cd:*)"
     ]
   }
 }
