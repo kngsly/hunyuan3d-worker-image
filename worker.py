@@ -185,12 +185,17 @@ def _preload_worker():
         _get_shape_pipeline()
         print("[worker] preload: shape pipeline loaded", flush=True)
 
-        # Only preload paint pipeline if textures are likely to be used.
+        # Paint pipeline preload is best-effort — if it fails, we can
+        # still serve shape-only requests and retry paint on first use.
         if os.environ.get("HY3D_PRELOAD_PAINT", "1").strip().lower() not in ("0", "false", "no", "off"):
-            _get_paint_pipeline()
-            print("[worker] preload: paint pipeline loaded", flush=True)
+            try:
+                _get_paint_pipeline()
+                print("[worker] preload: paint pipeline loaded", flush=True)
+            except Exception:
+                tb = traceback.format_exc()
+                print(f"[worker] preload: paint pipeline failed (will retry on first use):\n{tb}", flush=True)
 
-        _set_ready("ready", "all pipelines loaded")
+        _set_ready("ready", "shape pipeline loaded")
         st = get_ready_state()
         dt = (st.get("ready_at") or time.time()) - (st.get("started_at") or time.time())
         print(f"[worker] preload: ready (load_time_sec={dt:.1f})", flush=True)
