@@ -186,23 +186,26 @@ def generate_glb_from_image_bytes(
     # Mesh decimation (if requested) — reload via trimesh to guarantee
     # we have a Trimesh object with simplify_quadric_decimation support,
     # since the Hunyuan3D pipeline returns its own mesh type.
-    # NOTE: We must NOT use force="mesh" as it strips materials/textures.
+    # IMPORTANT: Skip trimesh-based decimation when textures are enabled,
+    # because trimesh's quadric decimation strips UV coordinates and
+    # force="mesh" drops materials entirely. The textured GLB from the
+    # paint pipeline is exported as-is.
     if decimation_target is not None and decimation_target > 0:
-        try:
-            import trimesh
-            loaded = trimesh.load(str(out_path))
-            if isinstance(loaded, trimesh.Scene):
-                # Decimate each geometry in the scene, preserving materials
-                for name, geom in loaded.geometry.items():
-                    if isinstance(geom, trimesh.Trimesh):
-                        loaded.geometry[name] = _decimate_mesh(geom, decimation_target)
-                loaded.export(str(out_path))
-            else:
-                # Single mesh (unlikely for textured GLBs, but handle it)
+        if want_textures:
+            print(
+                f"[worker] decimation skipped: textures are enabled, "
+                f"trimesh decimation would strip UV/material data. "
+                f"Exporting textured mesh as-is.",
+                flush=True,
+            )
+        else:
+            try:
+                import trimesh
+                loaded = trimesh.load(str(out_path), force="mesh")
                 decimated = _decimate_mesh(loaded, decimation_target)
                 decimated.export(str(out_path))
-        except Exception as e:
-            print(f"[worker] trimesh decimation failed, keeping original: {e}", flush=True)
+            except Exception as e:
+                print(f"[worker] trimesh decimation failed, keeping original: {e}", flush=True)
 
     dt_total = time.time() - t0
     print(
