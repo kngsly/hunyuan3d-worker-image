@@ -442,13 +442,13 @@ def generate_glb_from_image_bytes(
             textured_obj = out_dir / f"_textured_{uuid.uuid4().hex}.obj"
             textured_glb = Path(str(textured_obj).replace(".obj", ".glb"))
 
-            # Pass all reference images to the paint pipeline (it accepts a list of PIL Images)
-            image_input = all_texture_images if len(all_texture_images) > 1 else str(input_image_path)
-            print(f"[worker] texture: trying tier={tier['label']} mesh={shape_obj} images={len(all_texture_images)}", flush=True)
+            # The paint pipeline only supports a single image (its list handling is buggy).
+            # Pass the primary image as a file path.
+            print(f"[worker] texture: trying tier={tier['label']} mesh={shape_obj}", flush=True)
             t_tex = time.time()
             result_path = paint_pipeline(
                 mesh_path=str(shape_obj),
-                image_path=image_input,
+                image_path=str(input_image_path),
                 output_mesh_path=str(textured_obj),
                 save_glb=True,
             )
