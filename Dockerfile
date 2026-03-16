@@ -46,9 +46,6 @@ RUN if ! python -c "import custom_rasterizer" 2>/dev/null; then \
       echo "pre-built wheel failed, trying source build..." \
       && (cd hy3dpaint/packages/custom_rasterizer && pip install -e .) || echo "custom_rasterizer build FAILED"; \
     fi
-# Verify custom_rasterizer is installed (fatal if not — paint pipeline needs it)
-RUN python -c "import custom_rasterizer; print('custom_rasterizer OK')"
-
 # Build mesh_inpaint_processor (pybind11 C++ extension, no CUDA needed).
 # Optional — guarded import in MeshRender.py, so non-fatal if it fails.
 RUN pip install pybind11 && \
@@ -58,6 +55,9 @@ RUN pip install pybind11 && \
 
 COPY requirements-docker.txt /app/requirements-docker.txt
 RUN pip install -r /app/requirements-docker.txt
+
+# Verify critical native extensions now that all deps (including torch) are installed
+RUN python -c "import custom_rasterizer; print('custom_rasterizer OK')"
 
 # Model weights are NOT baked into the image — they are downloaded at
 # container startup via huggingface_hub.snapshot_download() and cached in
