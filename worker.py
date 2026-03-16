@@ -135,23 +135,26 @@ def _get_paint_pipeline(texture_output_size: int | None = None):
     _set_ready("loading", "loading paint pipeline")
     Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig = _lazy_import_paint_pipeline()
 
-    # Configure the paint pipeline (matches gradio_app.py usage).
-    # Paths are relative to /app (where the HF Space code is cloned).
-    max_num_view = int(os.environ.get("HY3D_PAINT_VIEWS", "8"))
-    resolution = int(os.environ.get("HY3D_PAINT_RESOLUTION", "768"))
+    # Configure the paint pipeline.
+    # Defaults tuned for 24GB GPUs (RTX 4090). The official HF Space uses
+    # 8 views / 768 resolution but that needs ~40GB+ VRAM.
+    max_num_view = int(os.environ.get("HY3D_PAINT_VIEWS", "6"))
+    resolution = int(os.environ.get("HY3D_PAINT_RESOLUTION", "512"))
     conf = Hunyuan3DPaintConfig(max_num_view, resolution)
     conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
     conf.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
     conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
 
     # Apply texture_output_size from the request (1024, 2048, or 4096).
-    # This maps to conf.texture_size (UV bake resolution).
-    # render_size is the rasterization resolution for view baking.
+    # Cap render_size to keep VRAM usage under 24GB.
     ALLOWED_TEXTURE_SIZES = {1024, 2048, 4096}
     if texture_output_size and texture_output_size in ALLOWED_TEXTURE_SIZES:
         conf.texture_size = texture_output_size
-        conf.render_size = min(2048, texture_output_size)
+        conf.render_size = min(1024, texture_output_size)
         print(f"[worker] paint config: texture_size={conf.texture_size}, render_size={conf.render_size}", flush=True)
+    else:
+        conf.texture_size = 1024
+        conf.render_size = 1024
 
     _PAINT_PIPELINE = Hunyuan3DPaintPipeline(conf)
     _PAINT_PIPELINE._hy3d_texture_size = conf.texture_size  # tag for cache invalidation
@@ -317,8 +320,15 @@ def generate_glb_from_image_bytes(
     input_image_path = out_dir / f"_input_{uuid.uuid4().hex}.png"
     img.save(str(input_image_path), format="PNG")
 
-    # Shape generation
+    # Shape generation — ensure pipeline is on GPU
     shape_pipeline = _get_shape_pipeline()
+    import torch as _torch
+    if hasattr(shape_pipeline, 'device') and str(getattr(shape_pipeline, 'device', '')) != 'cuda':
+        try:
+            shape_pipeline.to("cuda")
+            print("[worker] moved shape pipeline back to GPU", flush=True)
+        except Exception:
+            pass
     print("[worker] generating shape...", flush=True)
     t_shape = time.time()
     mesh = shape_pipeline(image=img, seed=seed)[0] if seed is not None else shape_pipeline(image=img)[0]
@@ -340,6 +350,15 @@ def generate_glb_from_image_bytes(
         except Exception as e:
             print(f"[worker] decimation failed, using original shape: {e}", flush=True)
             traceback.print_exc()
+
+    # Free shape pipeline VRAM before texturing — RTX 4090 (24GB) can't hold both.
+    if want_textures:
+        import torch
+        global _SHAPE_PIPELINE
+        if _SHAPE_PIPELINE is not None:
+            _SHAPE_PIPELINE.to("cpu")
+            torch.cuda.empty_cache()
+            print(f"[worker] offloaded shape pipeline to CPU, freed VRAM", flush=True)
 
     # Texture generation — the paint pipeline takes FILE PATHS, not objects.
     texture_status = "skipped"

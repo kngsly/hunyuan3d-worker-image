@@ -53,6 +53,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     NUMBA_THREADING_LAYER=workqueue \
     HF_HOME=/app/.cache/huggingface \
     HY3DGEN_MODELS=/app/.cache/hy3dgen
