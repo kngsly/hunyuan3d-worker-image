@@ -120,11 +120,65 @@ def _get_shape_pipeline():
     return _SHAPE_PIPELINE
 
 
-def _get_paint_pipeline(texture_output_size: int | None = None):
+# Fallback chains per requested texture_output_size.
+# On CUDA OOM, steps down to the next entry.  Keeps 8 views as long as
+# possible (better back/side coverage), then drops views as last resort.
+PAINT_TIER_CHAINS = {
+    4096: [
+        {"views": 8, "resolution": 768, "render_size": 2048, "texture_size": 4096, "label": "4096-ultra"},
+        {"views": 8, "resolution": 512, "render_size": 1024, "texture_size": 4096, "label": "4096-high"},
+        {"views": 8, "resolution": 512, "render_size": 1024, "texture_size": 2048, "label": "4096-med"},
+        {"views": 6, "resolution": 512, "render_size": 1024, "texture_size": 2048, "label": "4096-low"},
+        {"views": 6, "resolution": 512, "render_size": 1024, "texture_size": 1024, "label": "4096-min"},
+    ],
+    2048: [
+        {"views": 8, "resolution": 768, "render_size": 2048, "texture_size": 2048, "label": "2048-ultra"},
+        {"views": 8, "resolution": 512, "render_size": 1024, "texture_size": 2048, "label": "2048-high"},
+        {"views": 8, "resolution": 512, "render_size": 1024, "texture_size": 1024, "label": "2048-med"},
+        {"views": 6, "resolution": 512, "render_size": 1024, "texture_size": 1024, "label": "2048-low"},
+    ],
+    1024: [
+        {"views": 8, "resolution": 512, "render_size": 1024, "texture_size": 1024, "label": "1024-high"},
+        {"views": 8, "resolution": 512, "render_size": 512,  "texture_size": 1024, "label": "1024-med"},
+        {"views": 6, "resolution": 512, "render_size": 512,  "texture_size": 1024, "label": "1024-low"},
+    ],
+}
+# Default chain if no texture_output_size or unrecognized value
+PAINT_TIER_CHAINS["default"] = PAINT_TIER_CHAINS[1024]
+
+
+def _build_paint_pipeline(tier: dict, texture_output_size: int | None = None):
+    """Build a paint pipeline for the given quality tier."""
     global _PAINT_PIPELINE
 
-    # If a specific texture_output_size is requested that differs from
-    # the cached pipeline's config, rebuild with the new size.
+    Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig = _lazy_import_paint_pipeline()
+
+    views = int(os.environ.get("HY3D_PAINT_VIEWS", str(tier["views"])))
+    resolution = int(os.environ.get("HY3D_PAINT_RESOLUTION", str(tier["resolution"])))
+    conf = Hunyuan3DPaintConfig(views, resolution)
+    conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
+    conf.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
+    conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
+
+    # Tier defines all sizes — the chain is already tailored to the requested output size
+    conf.render_size = tier["render_size"]
+    conf.texture_size = tier["texture_size"]
+
+    _PAINT_PIPELINE = Hunyuan3DPaintPipeline(conf)
+    _PAINT_PIPELINE._hy3d_quality_tier = tier["label"]
+    _PAINT_PIPELINE._hy3d_texture_size = conf.texture_size
+    print(
+        f"[worker] paint pipeline built: tier={tier['label']} views={views} resolution={resolution} "
+        f"texture_size={conf.texture_size} render_size={conf.render_size}",
+        flush=True,
+    )
+    return _PAINT_PIPELINE
+
+
+def _get_paint_pipeline(texture_output_size: int | None = None):
+    """Return the cached paint pipeline, building it at the highest quality tier if needed."""
+    global _PAINT_PIPELINE
+
     if _PAINT_PIPELINE is not None:
         cached_tex_size = getattr(_PAINT_PIPELINE, "_hy3d_texture_size", None)
         if texture_output_size is None or texture_output_size == cached_tex_size:
@@ -133,37 +187,8 @@ def _get_paint_pipeline(texture_output_size: int | None = None):
         _PAINT_PIPELINE = None
 
     _set_ready("loading", "loading paint pipeline")
-    Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig = _lazy_import_paint_pipeline()
-
-    # Configure the paint pipeline.
-    # Defaults tuned for 24GB GPUs (RTX 4090). The official HF Space uses
-    # 8 views / 768 resolution but that needs ~40GB+ VRAM.
-    max_num_view = int(os.environ.get("HY3D_PAINT_VIEWS", "6"))
-    resolution = int(os.environ.get("HY3D_PAINT_RESOLUTION", "512"))
-    conf = Hunyuan3DPaintConfig(max_num_view, resolution)
-    conf.realesrgan_ckpt_path = "hy3dpaint/ckpt/RealESRGAN_x4plus.pth"
-    conf.multiview_cfg_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
-    conf.custom_pipeline = "hy3dpaint/hunyuanpaintpbr"
-
-    # Apply texture_output_size from the request (1024, 2048, or 4096).
-    # Cap render_size to keep VRAM usage under 24GB.
-    ALLOWED_TEXTURE_SIZES = {1024, 2048, 4096}
-    if texture_output_size and texture_output_size in ALLOWED_TEXTURE_SIZES:
-        conf.texture_size = texture_output_size
-        conf.render_size = min(1024, texture_output_size)
-        print(f"[worker] paint config: texture_size={conf.texture_size}, render_size={conf.render_size}", flush=True)
-    else:
-        conf.texture_size = 1024
-        conf.render_size = 1024
-
-    _PAINT_PIPELINE = Hunyuan3DPaintPipeline(conf)
-    _PAINT_PIPELINE._hy3d_texture_size = conf.texture_size  # tag for cache invalidation
-    print(
-        f"[worker] paint pipeline loaded (views={max_num_view}, resolution={resolution}, "
-        f"texture_size={conf.texture_size}, render_size={conf.render_size})",
-        flush=True,
-    )
-    return _PAINT_PIPELINE
+    chain = PAINT_TIER_CHAINS.get(texture_output_size, PAINT_TIER_CHAINS["default"])
+    return _build_paint_pipeline(chain[0], texture_output_size)
 
 
 def _get_rembg_session():
@@ -365,20 +390,24 @@ def generate_glb_from_image_bytes(
     final_glb = out_dir / f"{uuid.uuid4().hex}.glb"
 
     if want_textures:
-        try:
-            print(f"[worker] texture: requesting paint pipeline (texture_output_size={texture_output_size})", flush=True)
-            paint_pipeline = _get_paint_pipeline(texture_output_size=texture_output_size)
-            print(f"[worker] texture: paint pipeline ready, type={type(paint_pipeline).__name__}", flush=True)
-            t_tex = time.time()
+        import torch as _torch
 
-            # The paint pipeline writes an OBJ first, then converts to GLB
-            # via convert_obj_to_glb().  The GLB path is the OBJ path with
-            # the extension swapped to .glb.  So we must pass an .obj path.
+        def _is_oom(exc):
+            return "CUDA out of memory" in str(exc) or "OutOfMemoryError" in type(exc).__name__
+
+        def _try_texture(tier, texture_output_size):
+            """Attempt texture generation at a given quality tier. Returns (texture_status, success)."""
+            global _PAINT_PIPELINE
+            # Rebuild pipeline at this tier
+            _PAINT_PIPELINE = None
+            _torch.cuda.empty_cache()
+            paint_pipeline = _build_paint_pipeline(tier, texture_output_size)
+
             textured_obj = out_dir / f"_textured_{uuid.uuid4().hex}.obj"
             textured_glb = Path(str(textured_obj).replace(".obj", ".glb"))
 
-            # Pass OBJ to paint pipeline (pymeshlab's remesh_mesh needs OBJ, not GLB)
-            print(f"[worker] texture: calling paint pipeline mesh_path={shape_obj} image_path={input_image_path} output={textured_obj}", flush=True)
+            print(f"[worker] texture: trying tier={tier['label']} mesh={shape_obj} image={input_image_path}", flush=True)
+            t_tex = time.time()
             result_path = paint_pipeline(
                 mesh_path=str(shape_obj),
                 image_path=str(input_image_path),
@@ -386,43 +415,57 @@ def generate_glb_from_image_bytes(
                 save_glb=True,
             )
             dt_tex = time.time() - t_tex
-            print(f"[worker] texture: paint pipeline returned in {dt_tex:.1f}s: {result_path}", flush=True)
+            print(f"[worker] texture: tier={tier['label']} completed in {dt_tex:.1f}s", flush=True)
 
-            # List output files for debugging
-            import glob as globmod
-            out_files = globmod.glob(str(out_dir / "_textured_*"))
-            print(f"[worker] texture: output files matching _textured_*: {out_files}", flush=True)
-            print(f"[worker] texture: textured_obj exists={textured_obj.is_file()} textured_glb exists={textured_glb.is_file()}", flush=True)
-
-            # The pipeline returns the OBJ path; the GLB is at the .glb sibling.
+            # Check output files
             if textured_glb.is_file():
                 glb_size = textured_glb.stat().st_size
                 textured_glb.rename(final_glb)
-                texture_status = "success"
                 print(f"[worker] textured GLB: {final_glb} ({glb_size} bytes)", flush=True)
+                status = f"success (tier={tier['label']})"
             elif Path(str(result_path)).is_file():
-                # Fallback: if only the OBJ exists, use it (caller gets OBJ not GLB)
                 Path(str(result_path)).rename(final_glb)
-                texture_status = "success (obj only)"
-                print(f"[worker] textured OBJ (no GLB conversion): {final_glb}", flush=True)
+                status = f"success (obj only, tier={tier['label']})"
+                print(f"[worker] textured OBJ: {final_glb}", flush=True)
             else:
-                print(f"[worker] paint pipeline produced no output, falling back to shape-only", flush=True)
-                shape_glb.rename(final_glb)
-                texture_status = "failed: no output file produced"
+                print(f"[worker] tier={tier['label']} produced no output", flush=True)
+                return "failed: no output file produced", False
 
-            # Clean up the OBJ and any sidecar files (.mtl, textures)
-            for ext in (".obj", ".mtl"):
+            # Clean up sidecar files
+            for ext in (".obj", ".mtl", ".jpg"):
                 p = Path(str(textured_obj).replace(".obj", ext))
                 try:
                     if p.is_file():
                         p.unlink()
                 except OSError:
                     pass
-        except Exception as e:
-            tb = traceback.format_exc()
-            print(f"[worker] texture FAILED: {e}\n{tb}", flush=True)
-            texture_status = f"failed: {e}"
-            # Fall back to shape-only
+            return status, True
+
+        # Pick the fallback chain for the requested texture size
+        chain = PAINT_TIER_CHAINS.get(texture_output_size, PAINT_TIER_CHAINS["default"])
+        print(f"[worker] texture: chain={[t['label'] for t in chain]} texture_output_size={texture_output_size}", flush=True)
+
+        # Try quality tiers from highest to lowest, stepping down on OOM
+        texture_status = "failed: all tiers exhausted"
+        for tier_idx, tier in enumerate(chain):
+            try:
+                texture_status, success = _try_texture(tier, texture_output_size)
+                if success:
+                    break
+            except Exception as e:
+                _torch.cuda.empty_cache()
+                if _is_oom(e) and tier_idx < len(chain) - 1:
+                    next_tier = chain[tier_idx + 1]
+                    print(f"[worker] texture OOM at tier={tier['label']}, stepping down to tier={next_tier['label']}", flush=True)
+                    continue
+                else:
+                    tb = traceback.format_exc()
+                    print(f"[worker] texture FAILED at tier={tier['label']}: {e}\n{tb}", flush=True)
+                    texture_status = f"failed: {e}"
+                    break
+
+        # If all tiers failed, fall back to shape-only
+        if not texture_status.startswith("success"):
             if shape_glb.is_file():
                 shape_glb.rename(final_glb)
     else:
