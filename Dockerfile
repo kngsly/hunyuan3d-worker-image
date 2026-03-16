@@ -56,8 +56,9 @@ RUN pip install pybind11 && \
 COPY requirements-docker.txt /app/requirements-docker.txt
 RUN pip install -r /app/requirements-docker.txt
 
-# Verify critical native extensions now that all deps (including torch) are installed
-RUN python -c "import custom_rasterizer; print('custom_rasterizer OK')"
+# Verify critical native extensions (torch's libs need to be on LD_LIBRARY_PATH)
+RUN LD_LIBRARY_PATH="$(python -c 'import torch,os;print(os.path.dirname(torch.__file__)+"/lib")'):$LD_LIBRARY_PATH" \
+    python -c "import custom_rasterizer; print('custom_rasterizer OK')"
 
 # Model weights are NOT baked into the image — they are downloaded at
 # container startup via huggingface_hub.snapshot_download() and cached in
