@@ -193,11 +193,10 @@ async def generate(request: Request):
                         "texture_status": texture_status,
                     }
 
-                    worker_export = {}
+                    worker_export = {"texture_status": texture_status}
                     if preprocessed_path and preprocessed_path.is_file():
                         worker_export["preprocessed_images"] = [preprocessed_path.name]
-                    if worker_export:
-                        response["worker_export"] = worker_export
+                    response["worker_export"] = worker_export
 
                     yield json.dumps(response) + "\n"
                     return
