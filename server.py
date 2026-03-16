@@ -94,11 +94,24 @@ async def generate(request: Request):
     try:
         form = await request.form()
 
-        # Read image(s) — support both "image" (single) and "images" (multi)
+        # Read image(s) — "image" is the primary, "images" has all (including primary)
         image_file = form.get("image")
         if image_file is None:
             return JSONResponse({"success": False, "error": "No image uploaded"}, status_code=400)
         raw = await image_file.read()
+
+        # Collect additional images for multi-view texture reference
+        extra_image_bytes = []
+        for key, value in form.multi_items():
+            if key == "images":
+                try:
+                    img_bytes = await value.read()
+                    if img_bytes and img_bytes != raw:  # skip duplicate of primary
+                        extra_image_bytes.append(img_bytes)
+                except Exception:
+                    pass
+        if extra_image_bytes:
+            print(f"[server] received {1 + len(extra_image_bytes)} images for texture reference", flush=True)
 
         # Parse flags — textures default to ON; caller can disable with
         # no_texture=1 or by explicitly passing texture=0 / false / off.
@@ -151,6 +164,7 @@ async def generate(request: Request):
         loop = asyncio.get_event_loop()
         gen_kwargs = dict(
             image_bytes=raw,
+            extra_image_bytes_list=extra_image_bytes or None,
             out_dir=OUTPUT_DIR,
             want_textures=want_textures,
             preprocess_image=preprocess_image,

@@ -296,11 +296,37 @@ def _decimate_trimesh(mesh, target_faces: int):
 
 
 def _decimate_glb(glb_path: Path, target_faces: int):
-    """Reload a GLB via trimesh, decimate, and overwrite the file."""
+    """Reload a GLB via trimesh, decimate, and overwrite the file (untextured only)."""
     import trimesh
     loaded = trimesh.load(str(glb_path), force="mesh")
     decimated = _decimate_trimesh(loaded, target_faces)
     decimated.export(str(glb_path))
+
+
+def _decimate_textured_glb(glb_path: Path, target_faces: int):
+    """Decimate a textured GLB using pymeshlab, preserving UVs and texture maps."""
+    import pymeshlab
+    ms = pymeshlab.MeshSet()
+    ms.load_new_mesh(str(glb_path))
+    face_count = ms.current_mesh().face_number()
+    if face_count <= target_faces:
+        print(f"[worker] textured decimation skipped (faces={face_count}, target={target_faces})", flush=True)
+        return
+    print(f"[worker] textured decimation: {face_count} -> {target_faces} faces", flush=True)
+    t0 = time.time()
+    # Quadric edge collapse with texture preservation
+    ms.meshing_decimation_quadric_edge_collapse_with_texture(
+        targetfacenum=target_faces,
+        qualitythr=0.3,
+        preserveboundary=True,
+        preservenormal=True,
+        preservetopology=True,
+        planarquadric=True,
+    )
+    final = ms.current_mesh().face_number()
+    dt = time.time() - t0
+    print(f"[worker] textured decimation done in {dt:.1f}s (result={final} faces)", flush=True)
+    ms.save_current_mesh(str(glb_path))
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +341,7 @@ def generate_glb_from_image_bytes(
     seed: int | None = None,
     decimation_target: int | None = None,
     texture_output_size: int | None = None,
+    extra_image_bytes_list: list[bytes] | None = None,
 ) -> dict:
     """
     Generate a GLB from input image bytes.
@@ -344,6 +371,20 @@ def generate_glb_from_image_bytes(
     # Save the input image to disk (paint pipeline needs a file path)
     input_image_path = out_dir / f"_input_{uuid.uuid4().hex}.png"
     img.save(str(input_image_path), format="PNG")
+
+    # Load extra reference images for multi-view texturing
+    all_texture_images = [img]
+    if extra_image_bytes_list:
+        for idx, eb in enumerate(extra_image_bytes_list):
+            try:
+                extra_img = Image.open(io.BytesIO(eb)).convert("RGBA")
+                if preprocess_image:
+                    extra_img = remove_background(extra_img)
+                all_texture_images.append(extra_img)
+                print(f"[worker] loaded extra image {idx+1} for texture reference", flush=True)
+            except Exception as e:
+                print(f"[worker] failed to load extra image {idx+1}: {e}", flush=True)
+    print(f"[worker] texture reference images: {len(all_texture_images)}", flush=True)
 
     # Shape generation — ensure pipeline is on GPU
     shape_pipeline = _get_shape_pipeline()
@@ -401,11 +442,13 @@ def generate_glb_from_image_bytes(
             textured_obj = out_dir / f"_textured_{uuid.uuid4().hex}.obj"
             textured_glb = Path(str(textured_obj).replace(".obj", ".glb"))
 
-            print(f"[worker] texture: trying tier={tier['label']} mesh={shape_obj} image={input_image_path}", flush=True)
+            # Pass all reference images to the paint pipeline (it accepts a list of PIL Images)
+            image_input = all_texture_images if len(all_texture_images) > 1 else str(input_image_path)
+            print(f"[worker] texture: trying tier={tier['label']} mesh={shape_obj} images={len(all_texture_images)}", flush=True)
             t_tex = time.time()
             result_path = paint_pipeline(
                 mesh_path=str(shape_obj),
-                image_path=str(input_image_path),
+                image_path=image_input,
                 output_mesh_path=str(textured_obj),
                 save_glb=True,
             )
@@ -467,20 +510,19 @@ def generate_glb_from_image_bytes(
         # No textures requested — just use the (possibly decimated) shape mesh
         shape_glb.rename(final_glb)
 
-    # Decimation — only for shape-only (untextured) meshes.
-    # Trimesh decimation strips UV/texture data, so we skip it when textures
-    # were applied.  The paint pipeline's internal remesh_mesh already
-    # produces a reasonable poly count.
+    # Decimation on the final mesh.
     if decimation_target is not None and decimation_target > 0 and final_glb.is_file():
-        if texture_status.startswith("success"):
-            print(f"[worker] decimation skipped: textured mesh (would destroy UVs)", flush=True)
-        else:
-            try:
+        try:
+            if texture_status.startswith("success"):
+                # Textured mesh: use pymeshlab which preserves UVs and textures
+                _decimate_textured_glb(final_glb, decimation_target)
+            else:
+                # Untextured: trimesh is fine
                 _decimate_glb(final_glb, decimation_target)
-                print(f"[worker] decimated final mesh to target={decimation_target} ({final_glb.stat().st_size} bytes)", flush=True)
-            except Exception as e:
-                print(f"[worker] decimation failed, using undecimated mesh: {e}", flush=True)
-                traceback.print_exc()
+            print(f"[worker] decimated final mesh to target={decimation_target} ({final_glb.stat().st_size} bytes)", flush=True)
+        except Exception as e:
+            print(f"[worker] decimation failed, using undecimated mesh: {e}", flush=True)
+            traceback.print_exc()
 
     # Clean up temp files
     for tmp in (shape_glb, shape_obj, input_image_path):
