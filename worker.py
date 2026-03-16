@@ -467,15 +467,20 @@ def generate_glb_from_image_bytes(
         # No textures requested — just use the (possibly decimated) shape mesh
         shape_glb.rename(final_glb)
 
-    # Decimation on the FINAL GLB (after texturing so paint pipeline's
-    # remesh doesn't override it).
+    # Decimation — only for shape-only (untextured) meshes.
+    # Trimesh decimation strips UV/texture data, so we skip it when textures
+    # were applied.  The paint pipeline's internal remesh_mesh already
+    # produces a reasonable poly count.
     if decimation_target is not None and decimation_target > 0 and final_glb.is_file():
-        try:
-            _decimate_glb(final_glb, decimation_target)
-            print(f"[worker] decimated final mesh to target={decimation_target} ({final_glb.stat().st_size} bytes)", flush=True)
-        except Exception as e:
-            print(f"[worker] decimation failed, using undecimated mesh: {e}", flush=True)
-            traceback.print_exc()
+        if texture_status.startswith("success"):
+            print(f"[worker] decimation skipped: textured mesh (would destroy UVs)", flush=True)
+        else:
+            try:
+                _decimate_glb(final_glb, decimation_target)
+                print(f"[worker] decimated final mesh to target={decimation_target} ({final_glb.stat().st_size} bytes)", flush=True)
+            except Exception as e:
+                print(f"[worker] decimation failed, using undecimated mesh: {e}", flush=True)
+                traceback.print_exc()
 
     # Clean up temp files
     for tmp in (shape_glb, shape_obj, input_image_path):
