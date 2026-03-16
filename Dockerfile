@@ -102,9 +102,10 @@ RUN python -c "import torch; import custom_rasterizer; print('custom_rasterizer 
 # Model weights downloaded at startup via huggingface_hub
 RUN mkdir -p /app/.cache/huggingface
 
-# Patch mesh_utils.py: replace bpy-based OBJ→GLB conversion with trimesh
+# Patch mesh_utils.py: bpy-free version with load_mesh, save_mesh, convert_obj_to_glb
+COPY mesh_utils_patched.py /tmp/mesh_utils_patched.py
 COPY patch_mesh_utils.py /tmp/patch_mesh_utils.py
-RUN python /tmp/patch_mesh_utils.py && rm /tmp/patch_mesh_utils.py
+RUN python /tmp/patch_mesh_utils.py && rm /tmp/patch_mesh_utils.py /tmp/mesh_utils_patched.py
 
 COPY worker.py /app/worker.py
 COPY server.py /app/server.py
