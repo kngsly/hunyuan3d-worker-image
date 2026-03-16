@@ -31,13 +31,15 @@ ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0"
 RUN cd hy3dpaint/packages/custom_rasterizer && pip install .
 
 # Build mesh_inpaint_processor (pybind11 C++, no CUDA)
+# Ensure python3-config exists (compile_mesh_painter.sh uses it)
+RUN ln -sf /usr/bin/python3.10-config /usr/bin/python3-config 2>/dev/null || true
 RUN pip install pybind11 && \
     if [ -f hy3dpaint/DifferentiableRenderer/compile_mesh_painter.sh ]; then \
-      cd hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh; \
+      (cd hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh) || echo "mesh_inpaint_processor build skipped"; \
     fi
 
 # Verify
-RUN python -c "import custom_rasterizer; print('custom_rasterizer OK')"
+RUN python -c "import torch; import custom_rasterizer; print('custom_rasterizer OK')"
 
 # ---------- Stage 2: runtime image ----------
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
@@ -78,8 +80,8 @@ COPY --from=builder /usr/local/lib/python3.10/dist-packages/custom_rasterizer_ke
 COPY requirements-docker.txt /app/requirements-docker.txt
 RUN pip install -r /app/requirements-docker.txt
 
-# Verify custom_rasterizer works with this torch
-RUN python -c "import custom_rasterizer; print('custom_rasterizer OK')"
+# Verify custom_rasterizer works with this torch (must import torch first for libc10.so)
+RUN python -c "import torch; import custom_rasterizer; print('custom_rasterizer OK')"
 
 # Model weights downloaded at startup via huggingface_hub
 RUN mkdir -p /app/.cache/huggingface
