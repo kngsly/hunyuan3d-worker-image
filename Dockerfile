@@ -24,8 +24,11 @@ RUN git clone --depth 1 https://huggingface.co/spaces/tencent/Hunyuan3D-2.1 repo
     && mv repo/.git* . 2>/dev/null || true \
     && rm -rf repo
 
-# Build custom_rasterizer from source (needs nvcc)
-RUN cd hy3dpaint/packages/custom_rasterizer && pip install .
+# Build custom_rasterizer from source (needs nvcc).
+# TORCH_CUDA_ARCH_LIST avoids GPU auto-detection (no GPU at build time).
+# Covers Ampere (8.0, 8.6), Ada Lovelace (8.9), Hopper (9.0) — i.e. A100, RTX 3090, RTX 4090, H100.
+RUN TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0" \
+    cd hy3dpaint/packages/custom_rasterizer && pip install .
 
 # Build mesh_inpaint_processor (pybind11 C++, no CUDA)
 RUN pip install pybind11 && \
