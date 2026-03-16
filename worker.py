@@ -367,14 +367,9 @@ def generate_glb_from_image_bytes(
     mesh.export(str(shape_glb))
     print(f"[worker] shape mesh exported: obj={shape_obj.stat().st_size}B glb={shape_glb.stat().st_size}B", flush=True)
 
-    # Decimation on the shape mesh (before texturing) — only on the GLB fallback
-    if decimation_target is not None and decimation_target > 0:
-        try:
-            _decimate_glb(shape_glb, decimation_target)
-            print(f"[worker] decimated shape mesh ({shape_glb.stat().st_size} bytes)", flush=True)
-        except Exception as e:
-            print(f"[worker] decimation failed, using original shape: {e}", flush=True)
-            traceback.print_exc()
+    # Decimation happens AFTER texturing (on the final GLB) — see below.
+    # The paint pipeline's remesh_mesh() re-meshes internally, so decimating
+    # before texturing has no effect.
 
     # Free shape pipeline VRAM before texturing — RTX 4090 (24GB) can't hold both.
     if want_textures:
@@ -471,6 +466,16 @@ def generate_glb_from_image_bytes(
     else:
         # No textures requested — just use the (possibly decimated) shape mesh
         shape_glb.rename(final_glb)
+
+    # Decimation on the FINAL GLB (after texturing so paint pipeline's
+    # remesh doesn't override it).
+    if decimation_target is not None and decimation_target > 0 and final_glb.is_file():
+        try:
+            _decimate_glb(final_glb, decimation_target)
+            print(f"[worker] decimated final mesh to target={decimation_target} ({final_glb.stat().st_size} bytes)", flush=True)
+        except Exception as e:
+            print(f"[worker] decimation failed, using undecimated mesh: {e}", flush=True)
+            traceback.print_exc()
 
     # Clean up temp files
     for tmp in (shape_glb, shape_obj, input_image_path):
