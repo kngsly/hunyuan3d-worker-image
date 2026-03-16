@@ -325,12 +325,14 @@ def generate_glb_from_image_bytes(
     dt_shape = time.time() - t_shape
     print(f"[worker] shape generation done in {dt_shape:.1f}s", flush=True)
 
-    # Export shape mesh to GLB (needed as input for both paint pipeline and decimation)
+    # Export shape mesh — OBJ for paint pipeline (pymeshlab needs OBJ), GLB as fallback output.
+    shape_obj = out_dir / f"_shape_{uuid.uuid4().hex}.obj"
     shape_glb = out_dir / f"_shape_{uuid.uuid4().hex}.glb"
+    mesh.export(str(shape_obj))
     mesh.export(str(shape_glb))
-    print(f"[worker] shape mesh exported to {shape_glb} ({shape_glb.stat().st_size} bytes)", flush=True)
+    print(f"[worker] shape mesh exported: obj={shape_obj.stat().st_size}B glb={shape_glb.stat().st_size}B", flush=True)
 
-    # Decimation on the shape mesh (before texturing)
+    # Decimation on the shape mesh (before texturing) — only on the GLB fallback
     if decimation_target is not None and decimation_target > 0:
         try:
             _decimate_glb(shape_glb, decimation_target)
@@ -356,9 +358,10 @@ def generate_glb_from_image_bytes(
             textured_obj = out_dir / f"_textured_{uuid.uuid4().hex}.obj"
             textured_glb = Path(str(textured_obj).replace(".obj", ".glb"))
 
-            print(f"[worker] texture: calling paint pipeline mesh_path={shape_glb} image_path={input_image_path} output={textured_obj}", flush=True)
+            # Pass OBJ to paint pipeline (pymeshlab's remesh_mesh needs OBJ, not GLB)
+            print(f"[worker] texture: calling paint pipeline mesh_path={shape_obj} image_path={input_image_path} output={textured_obj}", flush=True)
             result_path = paint_pipeline(
-                mesh_path=str(shape_glb),
+                mesh_path=str(shape_obj),
                 image_path=str(input_image_path),
                 output_mesh_path=str(textured_obj),
                 save_glb=True,
@@ -408,7 +411,7 @@ def generate_glb_from_image_bytes(
         shape_glb.rename(final_glb)
 
     # Clean up temp files
-    for tmp in (shape_glb, input_image_path):
+    for tmp in (shape_glb, shape_obj, input_image_path):
         try:
             if tmp.is_file():
                 tmp.unlink()

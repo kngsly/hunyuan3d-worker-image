@@ -18,11 +18,15 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
 
 WORKDIR /build
 
-# Pull the Space code
+# Pull the Space code (with LFS files)
 RUN git clone --depth 1 https://huggingface.co/spaces/tencent/Hunyuan3D-2.1 repo \
     && mv repo/* . \
     && mv repo/.git* . 2>/dev/null || true \
-    && rm -rf repo
+    && rm -rf repo \
+    && echo "LFS check:" \
+    && ls -lh hy3dpaint/ckpt/RealESRGAN_x4plus.pth \
+    && test $(stat -c%s hy3dpaint/ckpt/RealESRGAN_x4plus.pth) -gt 1000000 \
+    || (echo "ERROR: RealESRGAN checkpoint is an LFS pointer, not the actual file" && exit 1)
 
 # Build custom_rasterizer from source (needs nvcc).
 # TORCH_CUDA_ARCH_LIST avoids GPU auto-detection (no GPU at build time).

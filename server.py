@@ -5,21 +5,24 @@ FastAPI server for Hunyuan3D-2.1 worker.
 Endpoints:
   - GET  /health  -> {"status":"OK"}
   - GET  /ready   -> {"ready": bool, "status": ..., "detail": ...}
-  - POST /generate (multipart) -> JSON with glb_path, preprocessed_images, etc.
+  - POST /generate (multipart) -> NDJSON stream with keepalive pings + final result
   - GET  /download/{filename}  -> file bytes
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, File, Form, UploadFile, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from worker import (
     generate_glb_from_image_bytes,
@@ -32,10 +35,12 @@ from worker import (
 APP_PORT = int(os.environ.get("PORT", "8000"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/outputs"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+KEEPALIVE_INTERVAL = int(os.environ.get("KEEPALIVE_INTERVAL", "30"))
 
 _STARTED_AT = time.time()
 _LAST_REQUEST_AT = _STARTED_AT
 _REQUEST_COUNT = 0
+_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 
 @asynccontextmanager
@@ -142,8 +147,10 @@ async def generate(request: Request):
             flush=True,
         )
 
-        result = generate_glb_from_image_bytes(
-            raw,
+        # Run generation in a thread so we can stream keepalive pings
+        loop = asyncio.get_event_loop()
+        gen_kwargs = dict(
+            image_bytes=raw,
             out_dir=OUTPUT_DIR,
             want_textures=want_textures,
             preprocess_image=preprocess_image,
@@ -151,33 +158,58 @@ async def generate(request: Request):
             decimation_target=decimation_target,
             texture_output_size=texture_output_size,
         )
+        gen_future = loop.run_in_executor(_EXECUTOR, lambda: generate_glb_from_image_bytes(**gen_kwargs))
 
-        glb_path = result["glb_path"]
-        preprocessed_path = result.get("preprocessed_image_path")
-        texture_status = result.get("texture_status", "unknown")
-        glb_size = glb_path.stat().st_size if Path(str(glb_path)).is_file() else 0
+        async def ndjson_stream():
+            t0 = time.time()
+            try:
+                while True:
+                    try:
+                        result = await asyncio.wait_for(asyncio.shield(gen_future), timeout=KEEPALIVE_INTERVAL)
+                    except asyncio.TimeoutError:
+                        # Generation still running — send keepalive
+                        elapsed = int(time.time() - t0)
+                        ping = json.dumps({"type": "keepalive", "elapsed_sec": elapsed})
+                        yield ping + "\n"
+                        continue
 
-        print(
-            f"[server] generate done: texture_status={texture_status} "
-            f"glb_size={glb_size} glb_path={glb_path}",
-            flush=True,
-        )
+                    # Generation finished
+                    elapsed = int(time.time() - t0)
+                    glb_path = result["glb_path"]
+                    preprocessed_path = result.get("preprocessed_image_path")
+                    texture_status = result.get("texture_status", "unknown")
+                    glb_size = glb_path.stat().st_size if Path(str(glb_path)).is_file() else 0
 
-        response = {
-            "success": True,
-            "glb_path": str(glb_path),
-            "texture_status": texture_status,
-        }
+                    print(
+                        f"[server] generate done: texture_status={texture_status} "
+                        f"glb_size={glb_size} glb_path={glb_path} elapsed={elapsed}s",
+                        flush=True,
+                    )
 
-        # Include preprocessed image filenames inside worker_export so the
-        # main crateyard service can download them (it reads worker_export.preprocessed_images).
-        worker_export = {}
-        if preprocessed_path and preprocessed_path.is_file():
-            worker_export["preprocessed_images"] = [preprocessed_path.name]
-        if worker_export:
-            response["worker_export"] = worker_export
+                    response = {
+                        "type": "result",
+                        "success": True,
+                        "glb_path": str(glb_path),
+                        "texture_status": texture_status,
+                    }
 
-        return JSONResponse(response, status_code=200)
+                    worker_export = {}
+                    if preprocessed_path and preprocessed_path.is_file():
+                        worker_export["preprocessed_images"] = [preprocessed_path.name]
+                    if worker_export:
+                        response["worker_export"] = worker_export
+
+                    yield json.dumps(response) + "\n"
+                    return
+
+            except Exception as e:
+                tb = traceback.format_exc()
+                if len(tb) > 20000:
+                    tb = tb[:20000] + "\n...[truncated]...\n"
+                error_resp = {"type": "result", "success": False, "error": tb or str(e)}
+                yield json.dumps(error_resp) + "\n"
+
+        return StreamingResponse(ndjson_stream(), media_type="application/x-ndjson")
 
     except Exception as e:
         tb = traceback.format_exc()
