@@ -192,14 +192,15 @@ def _preload_worker():
             try:
                 _get_paint_pipeline()
                 print("[worker] preload: paint pipeline loaded", flush=True)
-            except Exception:
+            except Exception as exc:
                 global _PAINT_LAST_ERROR
                 tb = traceback.format_exc()
-                _PAINT_LAST_ERROR = tb[-2000:] if tb else "unknown"
+                # Store just the exception line for the ready detail (it gets truncated)
+                _PAINT_LAST_ERROR = f"{type(exc).__name__}: {exc}"
                 print(f"[worker] preload: paint pipeline failed (will retry on first use):\n{tb}", flush=True)
 
         paint_ok = _PAINT_PIPELINE is not None
-        _set_ready("ready", f"shape=ok paint={'ok' if paint_ok else 'FAILED: ' + (_PAINT_LAST_ERROR or 'unknown')[:200]}")
+        _set_ready("ready", f"shape=ok paint={'ok' if paint_ok else 'FAILED: ' + (_PAINT_LAST_ERROR or 'unknown')[:500]}")
         st = get_ready_state()
         dt = (st.get("ready_at") or time.time()) - (st.get("started_at") or time.time())
         print(f"[worker] preload: ready (load_time_sec={dt:.1f})", flush=True)

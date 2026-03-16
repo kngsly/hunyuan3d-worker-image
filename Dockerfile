@@ -31,17 +31,29 @@ RUN git clone --depth 1 https://huggingface.co/spaces/tencent/Hunyuan3D-2.1 repo
     && mv repo/.git* . 2>/dev/null || true \
     && rm -rf repo
 
-# If present in the Space, install optional wheel (ignore failures).
+# custom_rasterizer: try the wheel from the cloned repo first, then download
+# the pre-built wheel directly (LFS pointers may not resolve in shallow clones),
+# then build from source as last resort.  The runtime base image lacks nvcc so
+# building from source will fail — the pre-built wheel is the expected path.
 RUN (ls -1 custom_rasterizer-*.whl >/dev/null 2>&1 && pip install custom_rasterizer-*.whl) || true
-
-# Build custom_rasterizer from source if the wheel wasn't available.
 RUN if ! python -c "import custom_rasterizer" 2>/dev/null; then \
-      (cd hy3dpaint/packages/custom_rasterizer && pip install -e .) || echo "custom_rasterizer build skipped"; \
+      echo "wheel from clone failed, downloading pre-built wheel..." \
+      && wget -q https://huggingface.co/spaces/tencent/Hunyuan3D-2.1/resolve/main/custom_rasterizer-0.1-cp310-cp310-linux_x86_64.whl \
+      && pip install custom_rasterizer-0.1-cp310-cp310-linux_x86_64.whl \
+      && rm -f custom_rasterizer-0.1-cp310-cp310-linux_x86_64.whl; \
     fi
+RUN if ! python -c "import custom_rasterizer" 2>/dev/null; then \
+      echo "pre-built wheel failed, trying source build..." \
+      && (cd hy3dpaint/packages/custom_rasterizer && pip install -e .) || echo "custom_rasterizer build FAILED"; \
+    fi
+# Verify custom_rasterizer is installed (fatal if not — paint pipeline needs it)
+RUN python -c "import custom_rasterizer; print('custom_rasterizer OK')"
 
-# Build DifferentiableRenderer CUDA extension (required by paint pipeline).
-RUN if [ -f hy3dpaint/DifferentiableRenderer/compile_mesh_painter.sh ]; then \
-      (cd hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh) || echo "DifferentiableRenderer build skipped"; \
+# Build mesh_inpaint_processor (pybind11 C++ extension, no CUDA needed).
+# Optional — guarded import in MeshRender.py, so non-fatal if it fails.
+RUN pip install pybind11 && \
+    if [ -f hy3dpaint/DifferentiableRenderer/compile_mesh_painter.sh ]; then \
+      (cd hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh) || echo "mesh_inpaint_processor build skipped"; \
     fi
 
 COPY requirements-docker.txt /app/requirements-docker.txt
