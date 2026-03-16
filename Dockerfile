@@ -80,6 +80,18 @@ COPY --from=builder /usr/local/lib/python3.10/dist-packages/custom_rasterizer_ke
 COPY requirements-docker.txt /app/requirements-docker.txt
 RUN pip install -r /app/requirements-docker.txt
 
+# Patch basicsr: functional_tensor was removed in torchvision 0.17+
+RUN python -c "\
+import pathlib, site, re; \
+p = pathlib.Path(site.getsitepackages()[0]) / 'basicsr' / 'data' / 'degradations.py'; \
+t = p.read_text(); \
+t = t.replace( \
+    'from torchvision.transforms.functional_tensor import rgb_to_grayscale', \
+    'try:\\n    from torchvision.transforms.functional_tensor import rgb_to_grayscale\\nexcept ModuleNotFoundError:\\n    from torchvision.transforms.functional import rgb_to_grayscale' \
+); \
+p.write_text(t); \
+print(f'patched {p}')"
+
 # Verify custom_rasterizer works with this torch (must import torch first for libc10.so)
 RUN python -c "import torch; import custom_rasterizer; print('custom_rasterizer OK')"
 
