@@ -314,13 +314,15 @@ def _decimate_textured_glb(glb_path: Path, target_faces: int):
         return
     print(f"[worker] textured decimation: {face_count} -> {target_faces} faces", flush=True)
     t0 = time.time()
-    # Quadric edge collapse with texture preservation
+    # Quadric edge collapse with texture preservation.
+    # qualitythr=1.0 allows aggressive reduction to reach the target face count.
+    # Previous value of 0.3 would stop early, producing ~40K faces regardless of target.
     ms.meshing_decimation_quadric_edge_collapse_with_texture(
         targetfacenum=target_faces,
-        qualitythr=0.3,
+        qualitythr=1.0,
         preserveboundary=True,
         preservenormal=True,
-        preservetopology=True,
+        preservetopology=False,
         planarquadric=True,
     )
     final = ms.current_mesh().face_number()
@@ -342,6 +344,9 @@ def generate_glb_from_image_bytes(
     decimation_target: int | None = None,
     texture_output_size: int | None = None,
     extra_image_bytes_list: list[bytes] | None = None,
+    octree_resolution: int | None = None,
+    num_inference_steps: int | None = None,
+    target_face_count: int | None = None,
 ) -> dict:
     """
     Generate a GLB from input image bytes.
@@ -395,11 +400,41 @@ def generate_glb_from_image_bytes(
             print("[worker] moved shape pipeline back to GPU", flush=True)
         except Exception:
             pass
-    print("[worker] generating shape...", flush=True)
+    # Build shape pipeline kwargs.
+    # octree_resolution: marching cubes grid density. Default 384 -> ~40K faces.
+    #   Higher values produce denser meshes (512 -> 100K+). Scales roughly cubically.
+    # num_inference_steps: diffusion quality. Default 50. More = better SDF quality.
+    shape_kwargs = {"image": img}
+    if seed is not None:
+        shape_kwargs["seed"] = seed
+    if octree_resolution is not None:
+        shape_kwargs["octree_resolution"] = octree_resolution
+    if num_inference_steps is not None:
+        shape_kwargs["num_inference_steps"] = num_inference_steps
+    print(f"[worker] generating shape (octree_resolution={octree_resolution or 'default'}, steps={num_inference_steps or 'default'}, target_faces={target_face_count})...", flush=True)
     t_shape = time.time()
-    mesh = shape_pipeline(image=img, seed=seed)[0] if seed is not None else shape_pipeline(image=img)[0]
+    mesh = shape_pipeline(**shape_kwargs)[0]
     dt_shape = time.time() - t_shape
-    print(f"[worker] shape generation done in {dt_shape:.1f}s", flush=True)
+    raw_face_count = len(mesh.faces) if hasattr(mesh, "faces") else 0
+    print(f"[worker] shape generation done in {dt_shape:.1f}s ({raw_face_count} faces from pipeline)", flush=True)
+
+    # Apply FaceReducer if target_face_count is set and the mesh exceeds it.
+    # The upstream pipeline does NOT reduce faces internally — it outputs the raw
+    # marching cubes mesh. We use hy3dshape's FaceReducer for controlled reduction.
+    if target_face_count is not None and target_face_count > 0 and raw_face_count > target_face_count:
+        try:
+            try:
+                from hy3dshape import FaceReducer
+            except ImportError:
+                from hy3dshape.postprocessors import FaceReducer
+            t_reduce = time.time()
+            face_reducer = FaceReducer()
+            mesh = face_reducer(mesh, max_facenum=target_face_count)
+            dt_reduce = time.time() - t_reduce
+            reduced_count = len(mesh.faces) if hasattr(mesh, "faces") else "?"
+            print(f"[worker] FaceReducer: {raw_face_count} -> {reduced_count} faces in {dt_reduce:.1f}s (target={target_face_count})", flush=True)
+        except Exception as e:
+            print(f"[worker] FaceReducer failed, using raw mesh: {e}", flush=True)
 
     # Export shape mesh — OBJ for paint pipeline (pymeshlab needs OBJ), GLB as fallback output.
     shape_obj = out_dir / f"_shape_{uuid.uuid4().hex}.obj"
@@ -413,13 +448,19 @@ def generate_glb_from_image_bytes(
     # before texturing has no effect.
 
     # Free shape pipeline VRAM before texturing — RTX 4090 (24GB) can't hold both.
+    # On high-VRAM GPUs (48GB+), skip offloading to avoid slow CPU-GPU transfers.
     if want_textures:
         import torch
         global _SHAPE_PIPELINE
         if _SHAPE_PIPELINE is not None:
-            _SHAPE_PIPELINE.to("cpu")
-            torch.cuda.empty_cache()
-            print(f"[worker] offloaded shape pipeline to CPU, freed VRAM", flush=True)
+            total_vram_gb = torch.cuda.mem_get_info()[1] / (1024**3)
+            if total_vram_gb < 40:
+                _SHAPE_PIPELINE.to("cpu")
+                torch.cuda.empty_cache()
+                print(f"[worker] offloaded shape pipeline to CPU, freed VRAM", flush=True)
+            else:
+                free_vram_gb = torch.cuda.mem_get_info()[0] / (1024**3)
+                print(f"[worker] keeping shape pipeline on GPU ({total_vram_gb:.0f}GB total, {free_vram_gb:.0f}GB free)", flush=True)
 
     # Texture generation — the paint pipeline takes FILE PATHS, not objects.
     texture_status = "skipped"

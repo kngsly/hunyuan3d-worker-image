@@ -150,13 +150,50 @@ async def generate(request: Request):
             except (ValueError, TypeError):
                 pass
 
+        # Parse optional shape generation parameters
+        octree_resolution = None
+        oct_raw = form.get("octree_resolution")
+        if oct_raw is not None:
+            try:
+                v = int(str(oct_raw).strip())
+                if 64 <= v <= 512:
+                    octree_resolution = v
+            except (ValueError, TypeError):
+                pass
+
+        num_inference_steps = None
+        steps_raw = form.get("num_inference_steps")
+        if steps_raw is not None:
+            try:
+                v = int(str(steps_raw).strip())
+                if 1 <= v <= 100:
+                    num_inference_steps = v
+            except (ValueError, TypeError):
+                pass
+
+        # Parse optional target face count for the pipeline's internal FaceReducer.
+        # This is DIFFERENT from decimation_target: target_face_count controls the
+        # pipeline's built-in reduction (default 40000), while decimation_target is
+        # our own post-processing step applied after texturing.
+        target_face_count = None
+        tfc_raw = form.get("target_face_count")
+        if tfc_raw is not None:
+            try:
+                v = int(str(tfc_raw).strip())
+                if v > 0:
+                    target_face_count = v
+            except (ValueError, TypeError):
+                pass
+
         # Log request info (matches API contract)
         expected_images = form.get("expected_images", "1")
         print(
             f"[worker] generate expected_images={expected_images} "
             f"textures={want_textures} preprocess={preprocess_image} "
             f"seed={seed} decimation_target={decimation_target} "
-            f"texture_output_size={texture_output_size} bytes={len(raw)}",
+            f"texture_output_size={texture_output_size} "
+            f"octree_resolution={octree_resolution} num_inference_steps={num_inference_steps} "
+            f"target_face_count={target_face_count} bytes={len(raw)}",
             flush=True,
         )
 
@@ -171,6 +208,9 @@ async def generate(request: Request):
             seed=seed,
             decimation_target=decimation_target,
             texture_output_size=texture_output_size,
+            octree_resolution=octree_resolution,
+            num_inference_steps=num_inference_steps,
+            target_face_count=target_face_count,
         )
         gen_future = loop.run_in_executor(_EXECUTOR, lambda: generate_glb_from_image_bytes(**gen_kwargs))
 
