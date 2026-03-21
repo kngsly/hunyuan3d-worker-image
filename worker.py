@@ -54,6 +54,32 @@ _PAINT_PIPELINE = None
 _PAINT_LAST_ERROR = None  # last paint pipeline error for diagnostics
 _REMBG_SESSION = None
 
+# Thread-safe generation progress — updated by worker thread, read by server keepalive pings.
+_GEN_PROGRESS_LOCK = threading.Lock()
+_GEN_PROGRESS = {"phase": None, "detail": None, "pct": None}
+
+
+def set_gen_progress(phase: str, detail: str = "", pct: int | None = None):
+    """Update generation progress (called from worker thread)."""
+    with _GEN_PROGRESS_LOCK:
+        _GEN_PROGRESS["phase"] = phase
+        _GEN_PROGRESS["detail"] = detail
+        _GEN_PROGRESS["pct"] = pct
+
+
+def get_gen_progress() -> dict:
+    """Read generation progress snapshot (called from async server)."""
+    with _GEN_PROGRESS_LOCK:
+        return dict(_GEN_PROGRESS)
+
+
+def clear_gen_progress():
+    """Reset progress after generation completes."""
+    with _GEN_PROGRESS_LOCK:
+        _GEN_PROGRESS["phase"] = None
+        _GEN_PROGRESS["detail"] = None
+        _GEN_PROGRESS["pct"] = None
+
 _READY_LOCK = threading.Lock()
 _READY: dict = {
     "status": "not_started",   # not_started | downloading | loading | ready | error
@@ -363,6 +389,8 @@ def generate_glb_from_image_bytes(
     t0 = time.time()
     img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
 
+    set_gen_progress("Preprocessing", "Preparing input image", 5)
+
     # Background removal
     preprocessed_image_path = None
     if preprocess_image:
@@ -411,17 +439,20 @@ def generate_glb_from_image_bytes(
         shape_kwargs["octree_resolution"] = octree_resolution
     if num_inference_steps is not None:
         shape_kwargs["num_inference_steps"] = num_inference_steps
+    set_gen_progress("Generating shape", "Running diffusion model", 10)
     print(f"[worker] generating shape (octree_resolution={octree_resolution or 'default'}, steps={num_inference_steps or 'default'}, target_faces={target_face_count})...", flush=True)
     t_shape = time.time()
     mesh = shape_pipeline(**shape_kwargs)[0]
     dt_shape = time.time() - t_shape
     raw_face_count = len(mesh.faces) if hasattr(mesh, "faces") else 0
     print(f"[worker] shape generation done in {dt_shape:.1f}s ({raw_face_count} faces from pipeline)", flush=True)
+    set_gen_progress("Shape complete", f"{raw_face_count} faces", 35)
 
     # Apply FaceReducer if target_face_count is set and the mesh exceeds it.
     # The upstream pipeline does NOT reduce faces internally — it outputs the raw
     # marching cubes mesh. We use hy3dshape's FaceReducer for controlled reduction.
     if target_face_count is not None and target_face_count > 0 and raw_face_count > target_face_count:
+        set_gen_progress("Reducing faces", f"{raw_face_count} -> {target_face_count}", 38)
         try:
             try:
                 from hy3dshape import FaceReducer
@@ -447,6 +478,7 @@ def generate_glb_from_image_bytes(
     # The paint pipeline's remesh_mesh() re-meshes internally, so decimating
     # before texturing has no effect.
 
+    set_gen_progress("Preparing textures", "Setting up paint pipeline", 40)
     # Free shape pipeline VRAM before texturing — RTX 4090 (24GB) can't hold both.
     # On high-VRAM GPUs (48GB+), skip offloading to avoid slow CPU-GPU transfers.
     if want_textures:
@@ -527,9 +559,12 @@ def generate_glb_from_image_bytes(
         # Try quality tiers from highest to lowest, stepping down on OOM
         texture_status = "failed: all tiers exhausted"
         for tier_idx, tier in enumerate(chain):
+            pct = 45 + int((tier_idx / max(len(chain), 1)) * 40)
+            set_gen_progress("Generating textures", f"Tier: {tier['label']}", pct)
             try:
                 texture_status, success = _try_texture(tier, texture_output_size)
                 if success:
+                    set_gen_progress("Textures complete", tier['label'], 90)
                     break
             except Exception as e:
                 _torch.cuda.empty_cache()
@@ -553,6 +588,7 @@ def generate_glb_from_image_bytes(
 
     # Decimation on the final mesh.
     if decimation_target is not None and decimation_target > 0 and final_glb.is_file():
+        set_gen_progress("Decimating mesh", f"Target: {decimation_target} faces", 92)
         try:
             if texture_status.startswith("success"):
                 # Textured mesh: use pymeshlab which preserves UVs and textures
@@ -573,6 +609,7 @@ def generate_glb_from_image_bytes(
         except OSError:
             pass
 
+    set_gen_progress("Finalizing", "Exporting GLB", 98)
     file_size = final_glb.stat().st_size if final_glb.is_file() else 0
     dt_total = time.time() - t0
     print(
@@ -583,6 +620,7 @@ def generate_glb_from_image_bytes(
         f"decimation_target={decimation_target or 'none'})",
         flush=True,
     )
+    set_gen_progress("Complete", f"{file_size} bytes", 100)
     return {
         "glb_path": final_glb,
         "preprocessed_image_path": preprocessed_image_path,

@@ -28,6 +28,8 @@ from worker import (
     generate_glb_from_image_bytes,
     get_ready_state,
     start_preload_in_background,
+    get_gen_progress,
+    clear_gen_progress,
     _is_truthy,
 )
 
@@ -221,13 +223,21 @@ async def generate(request: Request):
                     try:
                         result = await asyncio.wait_for(asyncio.shield(gen_future), timeout=KEEPALIVE_INTERVAL)
                     except asyncio.TimeoutError:
-                        # Generation still running — send keepalive
+                        # Generation still running — send keepalive with progress
                         elapsed = int(time.time() - t0)
-                        ping = json.dumps({"type": "keepalive", "elapsed_sec": elapsed})
-                        yield ping + "\n"
+                        progress = get_gen_progress()
+                        ping = {"type": "keepalive", "elapsed_sec": elapsed}
+                        if progress.get("phase"):
+                            ping["phase"] = progress["phase"]
+                        if progress.get("detail"):
+                            ping["detail"] = progress["detail"]
+                        if progress.get("pct") is not None:
+                            ping["pct"] = progress["pct"]
+                        yield json.dumps(ping) + "\n"
                         continue
 
                     # Generation finished
+                    clear_gen_progress()
                     elapsed = int(time.time() - t0)
                     glb_path = result["glb_path"]
                     preprocessed_path = result.get("preprocessed_image_path")
