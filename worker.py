@@ -479,20 +479,19 @@ def generate_glb_from_image_bytes(
     # before texturing has no effect.
 
     set_gen_progress("Preparing textures", "Setting up paint pipeline", 40)
-    # Free shape pipeline VRAM before texturing — RTX 4090 (24GB) can't hold both.
-    # On high-VRAM GPUs (48GB+), skip offloading to avoid slow CPU-GPU transfers.
+    # Free shape pipeline VRAM before texturing — always offload regardless of
+    # total VRAM.  Even A100 (80GB) can OOM during 4096-ultra texture painting
+    # if the shape pipeline remains resident.
     if want_textures:
         import torch
+        import gc
         global _SHAPE_PIPELINE
         if _SHAPE_PIPELINE is not None:
-            total_vram_gb = torch.cuda.mem_get_info()[1] / (1024**3)
-            if total_vram_gb < 40:
-                _SHAPE_PIPELINE.to("cpu")
-                torch.cuda.empty_cache()
-                print(f"[worker] offloaded shape pipeline to CPU, freed VRAM", flush=True)
-            else:
-                free_vram_gb = torch.cuda.mem_get_info()[0] / (1024**3)
-                print(f"[worker] keeping shape pipeline on GPU ({total_vram_gb:.0f}GB total, {free_vram_gb:.0f}GB free)", flush=True)
+            _SHAPE_PIPELINE.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+            free_gb = torch.cuda.mem_get_info()[0] / (1024**3)
+            print(f"[worker] offloaded shape pipeline to CPU — VRAM after offload: {free_gb:.1f}GB free", flush=True)
 
     # Texture generation — the paint pipeline takes FILE PATHS, not objects.
     texture_status = "skipped"
@@ -554,7 +553,8 @@ def generate_glb_from_image_bytes(
 
         # Pick the fallback chain for the requested texture size
         chain = PAINT_TIER_CHAINS.get(texture_output_size, PAINT_TIER_CHAINS["default"])
-        print(f"[worker] texture: chain={[t['label'] for t in chain]} texture_output_size={texture_output_size}", flush=True)
+        free_gb = _torch.cuda.mem_get_info()[0] / (1024**3)
+        print(f"[worker] texture: chain={[t['label'] for t in chain]} texture_output_size={texture_output_size} VRAM={free_gb:.1f}GB free", flush=True)
 
         # Try quality tiers from highest to lowest, stepping down on OOM
         texture_status = "failed: all tiers exhausted"
