@@ -329,20 +329,25 @@ def _decimate_glb(glb_path: Path, target_faces: int):
     decimated.export(str(glb_path))
 
 
-def _decimate_textured_glb(glb_path: Path, target_faces: int):
-    """Decimate a textured GLB using pymeshlab, preserving UVs and texture maps."""
+def _remesh_textured_glb(glb_path: Path, target_faces: int):
+    """Remesh/decimate a textured GLB using pymeshlab to reach the target face count.
+
+    Handles reduction when current faces > target. Preserves UVs and texture maps.
+    Does NOT upsample - if current < target, mesh is left as-is.
+    """
     import pymeshlab
     ms = pymeshlab.MeshSet()
     ms.load_new_mesh(str(glb_path))
     face_count = ms.current_mesh().face_number()
+
     if face_count <= target_faces:
-        print(f"[worker] textured decimation skipped (faces={face_count}, target={target_faces})", flush=True)
+        print(f"[worker] textured remesh skipped (faces={face_count} <= target={target_faces})", flush=True)
         return
-    print(f"[worker] textured decimation: {face_count} -> {target_faces} faces", flush=True)
+
+    print(f"[worker] textured remesh: {face_count} -> {target_faces} faces", flush=True)
     t0 = time.time()
     # Quadric edge collapse with texture preservation.
     # qualitythr=1.0 allows aggressive reduction to reach the target face count.
-    # Previous value of 0.3 would stop early, producing ~40K faces regardless of target.
     ms.meshing_decimation_quadric_edge_collapse_with_texture(
         targetfacenum=target_faces,
         qualitythr=1.0,
@@ -353,7 +358,7 @@ def _decimate_textured_glb(glb_path: Path, target_faces: int):
     )
     final = ms.current_mesh().face_number()
     dt = time.time() - t0
-    print(f"[worker] textured decimation done in {dt:.1f}s (result={final} faces)", flush=True)
+    print(f"[worker] textured remesh done in {dt:.1f}s (result={final} faces)", flush=True)
     ms.save_current_mesh(str(glb_path))
 
 
@@ -432,6 +437,22 @@ def generate_glb_from_image_bytes(
     # octree_resolution: marching cubes grid density. Default 384 -> ~40K faces.
     #   Higher values produce denser meshes (512 -> 100K+). Scales roughly cubically.
     # num_inference_steps: diffusion quality. Default 50. More = better SDF quality.
+
+    # Calculate octree_resolution from decimation_target if specified
+    # Relationship: faces ~ (octree_resolution)^3
+    # Base: 384 -> ~40K faces
+    # Track if we calculated octree_resolution to skip post-processing decimation
+    _calculated_octree_from_target = False
+    if octree_resolution is None and decimation_target is not None:
+        BASE_RESOLUTION = 384
+        BASE_FACES = 40000
+        # Calculate required resolution: target_resolution = base * (target / base_faces)^(1/3)
+        calculated_resolution = int(BASE_RESOLUTION * (decimation_target / BASE_FACES) ** (1/3))
+        # Clamp to reasonable range (min 64, max 768)
+        octree_resolution = max(64, min(768, calculated_resolution))
+        _calculated_octree_from_target = True
+        print(f"[worker] calculated octree_resolution={octree_resolution} for decimation_target={decimation_target}", flush=True)
+
     shape_kwargs = {"image": img}
     if seed is not None:
         shape_kwargs["seed"] = seed
@@ -515,6 +536,22 @@ def generate_glb_from_image_bytes(
             textured_obj = out_dir / f"_textured_{uuid.uuid4().hex}.obj"
             textured_glb = Path(str(textured_obj).replace(".obj", ".glb"))
 
+            # Monkey-patch remesh_mesh to skip remeshing if we calculated octree from target
+            # This prevents the paint pipeline from downscaling the mesh to ~40k faces
+            original_remesh = None
+            if _calculated_octree_from_target:
+                try:
+                    from hy3dpaint import mesh_utils
+                    original_remesh = mesh_utils.remesh_mesh
+                    # Replace with no-op function that returns the mesh unchanged
+                    def _skip_remesh(mesh, target_faces=None):
+                        print(f"[worker] skipping paint pipeline remesh (target_faces={target_faces})", flush=True)
+                        return mesh
+                    mesh_utils.remesh_mesh = _skip_remesh
+                    print("[worker] monkey-patched remesh_mesh to skip remeshing", flush=True)
+                except Exception as e:
+                    print(f"[worker] failed to monkey-patch remesh_mesh: {e}", flush=True)
+
             # The paint pipeline only supports a single image (its list handling is buggy).
             # Pass the primary image as a file path.
             print(f"[worker] texture: trying tier={tier['label']} mesh={shape_obj}", flush=True)
@@ -526,6 +563,15 @@ def generate_glb_from_image_bytes(
                 save_glb=True,
             )
             dt_tex = time.time() - t_tex
+
+            # Restore original remesh function
+            if original_remesh is not None:
+                try:
+                    from hy3dpaint import mesh_utils
+                    mesh_utils.remesh_mesh = original_remesh
+                    print("[worker] restored original remesh_mesh", flush=True)
+                except Exception:
+                    pass
             print(f"[worker] texture: tier={tier['label']} completed in {dt_tex:.1f}s", flush=True)
 
             # Check output files
@@ -588,12 +634,15 @@ def generate_glb_from_image_bytes(
         shape_glb.rename(final_glb)
 
     # Decimation on the final mesh.
-    if decimation_target is not None and decimation_target > 0 and final_glb.is_file():
+    # Skip post-processing decimation if we calculated octree_resolution from decimation_target
+    # (the mesh is already generated at roughly the target resolution)
+    skip_decimation = _calculated_octree_from_target
+    if decimation_target is not None and decimation_target > 0 and final_glb.is_file() and not skip_decimation:
         set_gen_progress("Decimating mesh", f"Target: {decimation_target} faces", 92)
         try:
             if texture_status.startswith("success"):
                 # Textured mesh: use pymeshlab which preserves UVs and textures
-                _decimate_textured_glb(final_glb, decimation_target)
+                _remesh_textured_glb(final_glb, decimation_target)
             else:
                 # Untextured: trimesh is fine
                 _decimate_glb(final_glb, decimation_target)
