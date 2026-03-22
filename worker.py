@@ -451,7 +451,8 @@ def generate_glb_from_image_bytes(
     # Apply FaceReducer if target_face_count is set and the mesh exceeds it.
     # The upstream pipeline does NOT reduce faces internally — it outputs the raw
     # marching cubes mesh. We use hy3dshape's FaceReducer for controlled reduction.
-    if target_face_count is not None and target_face_count > 0 and raw_face_count > target_face_count:
+    # FIXED: Always use raw_face_count (post-FaceReducer) for the check, not pre-FaceReducer count.
+    if target_face_count is not None and len(mesh.faces) > target_face_count:
         set_gen_progress("Reducing faces", f"{raw_face_count} -> {target_face_count}", 38)
         try:
             try:
