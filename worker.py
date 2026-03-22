@@ -173,11 +173,65 @@ PAINT_TIER_CHAINS = {
 PAINT_TIER_CHAINS["default"] = PAINT_TIER_CHAINS[1024]
 
 
-def _build_paint_pipeline(tier: dict, texture_output_size: int | None = None):
+def _patch_paint_config(target_faces: int | None = None):
+    """Patch the paint pipeline config to increase remesh target face count."""
+    if target_faces is None:
+        return
+
+    config_path = "hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
+    try:
+        with open(config_path, "r") as f:
+            content = f.read()
+
+        # The config likely has a remesh_target_faces or similar parameter
+        # Try common patterns for remesh face count settings
+        original_content = content
+
+        # Pattern 1: remesh_target_faces: 40000
+        if "remesh_target_faces:" in content:
+            import re
+            content = re.sub(
+                r'remesh_target_faces:\s*\d+',
+                f'remesh_target_faces: {target_faces}',
+                content
+            )
+            print(f"[worker] patched remesh_target_faces to {target_faces}", flush=True)
+
+        # Pattern 2: target_faces: 40000 (in remesh section)
+        elif re.search(r'target_faces:\s*\d+', content):
+            import re
+            content = re.sub(
+                r'target_faces:\s*\d+',
+                f'target_faces: {target_faces}',
+                content
+            )
+            print(f"[worker] patched target_faces to {target_faces}", flush=True)
+
+        # Pattern 3: Add remesh_target_faces if not found
+        else:
+            content += f"\n# Auto-patched by hunyuan3d-worker\nremesh_target_faces: {target_faces}\n"
+            print(f"[worker] added remesh_target_faces={target_faces} to config", flush=True)
+
+        if content != original_content:
+            with open(config_path, "w") as f:
+                f.write(content)
+            print(f"[worker] successfully patched {config_path}", flush=True)
+        else:
+            print(f"[worker] no remesh settings found in {config_path}", flush=True)
+
+    except Exception as e:
+        print(f"[worker] failed to patch paint config: {e}", flush=True)
+
+
+def _build_paint_pipeline(tier: dict, texture_output_size: int | None = None, target_faces: int | None = None):
     """Build a paint pipeline for the given quality tier."""
     global _PAINT_PIPELINE
 
     Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig = _lazy_import_paint_pipeline()
+
+    # Patch config to increase remesh target if target_faces is specified
+    if target_faces is not None:
+        _patch_paint_config(target_faces)
 
     views = int(os.environ.get("HY3D_PAINT_VIEWS", str(tier["views"])))
     resolution = int(os.environ.get("HY3D_PAINT_RESOLUTION", str(tier["resolution"])))
@@ -531,26 +585,10 @@ def generate_glb_from_image_bytes(
             # Rebuild pipeline at this tier
             _PAINT_PIPELINE = None
             _torch.cuda.empty_cache()
-            paint_pipeline = _build_paint_pipeline(tier, texture_output_size)
+            paint_pipeline = _build_paint_pipeline(tier, texture_output_size, target_faces=decimation_target)
 
             textured_obj = out_dir / f"_textured_{uuid.uuid4().hex}.obj"
             textured_glb = Path(str(textured_obj).replace(".obj", ".glb"))
-
-            # Monkey-patch remesh_mesh to skip remeshing if we calculated octree from target
-            # This prevents the paint pipeline from downscaling the mesh to ~40k faces
-            original_remesh = None
-            if _calculated_octree_from_target:
-                try:
-                    from hy3dpaint import mesh_utils
-                    original_remesh = mesh_utils.remesh_mesh
-                    # Replace with no-op function that returns the mesh unchanged
-                    def _skip_remesh(mesh, target_faces=None):
-                        print(f"[worker] skipping paint pipeline remesh (target_faces={target_faces})", flush=True)
-                        return mesh
-                    mesh_utils.remesh_mesh = _skip_remesh
-                    print("[worker] monkey-patched remesh_mesh to skip remeshing", flush=True)
-                except Exception as e:
-                    print(f"[worker] failed to monkey-patch remesh_mesh: {e}", flush=True)
 
             # The paint pipeline only supports a single image (its list handling is buggy).
             # Pass the primary image as a file path.
@@ -563,15 +601,6 @@ def generate_glb_from_image_bytes(
                 save_glb=True,
             )
             dt_tex = time.time() - t_tex
-
-            # Restore original remesh function
-            if original_remesh is not None:
-                try:
-                    from hy3dpaint import mesh_utils
-                    mesh_utils.remesh_mesh = original_remesh
-                    print("[worker] restored original remesh_mesh", flush=True)
-                except Exception:
-                    pass
             print(f"[worker] texture: tier={tier['label']} completed in {dt_tex:.1f}s", flush=True)
 
             # Check output files
