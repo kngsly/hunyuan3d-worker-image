@@ -307,6 +307,17 @@ def _preload_worker():
                 _PAINT_LAST_ERROR = f"{type(exc).__name__}: {exc}"
                 print(f"[worker] preload: paint pipeline failed (will retry on first use):\n{tb}", flush=True)
 
+        # Rembg (background removal) preload is best-effort — the BiRefNet model
+        # downloads from Hugging Face on first use. Preload it here so the download
+        # happens under the generous startup timeout instead of mid-generation,
+        # where a short HF read timeout can kill the task.
+        if os.environ.get("HY3D_PRELOAD_REMBG", "1").strip().lower() not in ("0", "false", "no", "off"):
+            try:
+                _get_rembg_session()
+                print("[worker] preload: rembg session loaded", flush=True)
+            except Exception as exc:
+                print(f"[worker] preload: rembg failed (will retry on first use): {type(exc).__name__}: {exc}", flush=True)
+
         paint_ok = _PAINT_PIPELINE is not None
         _set_ready("ready", f"shape=ok paint={'ok' if paint_ok else 'FAILED: ' + (_PAINT_LAST_ERROR or 'unknown')[:500]}")
         st = get_ready_state()

@@ -56,7 +56,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     NUMBA_THREADING_LAYER=workqueue \
     HF_HOME=/app/.cache/huggingface \
-    HY3DGEN_MODELS=/app/.cache/hy3dgen
+    HY3DGEN_MODELS=/app/.cache/hy3dgen \
+    HF_HUB_DOWNLOAD_TIMEOUT=120 \
+    HF_HUB_ETAG_TIMEOUT=120
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3.10 python3.10-venv python3.10-dev python3-pip \
